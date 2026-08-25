@@ -1,13 +1,11 @@
 from app.database.session import SessionLocal
 from app.models.conducting_body import ConductingBody
 from app.models.exam import Exam
+from sqlalchemy import select
 
 
 def create_exam(
-    body_name,
-    main_website,
-    body_description,
-    logo_url,
+    body_id,
     exam_name,
     exam_type,
     exam_description,
@@ -16,24 +14,18 @@ def create_exam(
 ):
     with SessionLocal() as s:
 
-        body = ConductingBody(
-            name=body_name,
-            main_website=main_website,
-            description=body_description,
-            logo_url=logo_url
-        )
+        body=s.scalar(select(ConductingBody).where (ConductingBody.body_id==body_id))
 
-        exam = Exam(
+        
+        exam=Exam(
             name=exam_name,
             type=exam_type,
             description=exam_description,
             off_exam_page=official_exam_page,
             status=status
         )
-
         body.exams.append(exam)
-
-        s.add(body)
+        s.add(exam)
         s.commit()
 
         return exam.exam_id
