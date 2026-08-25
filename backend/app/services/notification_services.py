@@ -56,3 +56,34 @@ def create_notification(
         s.commit()
 
         return notification.notification_id
+def get_notifications(student_id):
+
+    with SessionLocal() as s:
+
+        student = s.scalar(
+            select(Student).where(
+                Student.student_id == student_id
+            )
+        )
+
+        if student is None:
+            raise ValueError("Student not found")
+
+        return student.notifications
+def mark_notification_as_read(notification_id):
+
+    with SessionLocal() as s:
+
+        notification = s.scalar(
+            select(Notification).where(
+                Notification.notification_id == notification_id
+            )
+        )
+
+        if notification is None:
+            raise ValueError("Notification not found")
+
+        notification.is_read = True
+        notification.read_at = datetime.now()
+
+        s.commit()
