@@ -18,3 +18,5 @@ Thumbs.db
 
 # Node modules
 node_modules/
+# Python packaging
+*.egg-info/
