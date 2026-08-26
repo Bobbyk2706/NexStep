@@ -12,48 +12,74 @@ It combines **AI, automation, and rule-based eligibility evaluation** to provide
 
 ### Student
 
-* Registration & Login
-* Student Profile
-* Automatic Exam Eligibility Checking
-* Eligible / Non-Eligible Exams
-* Exam Tracking
-* Deadline Reminders
-* In-App & Email Notifications
-* AI Chat Assistant
+- Registration & Login
+- Student Profile
+- Automatic Exam Eligibility Checking
+- Eligible / Non-Eligible Exams
+- Exam Tracking
+- Deadline Reminders
+- In-App & Email Notifications
+- AI Chat Assistant
 
 ### Admin
 
-* Manage Examinations
-* Manage Eligibility Rules
-* Review AI-extracted information
-* Approve / Reject updates
-* Audit Logs
+- Manage Examinations
+- Manage Eligibility Rules
+- Review AI-extracted information
+- Approve / Reject updates
+- Audit Logs
 
 ### Automation & AI
 
-* Monitor official examination websites
-* Detect new and updated notifications
-* Extract information from official notifications
-* Compare notification versions
-* Summarize important updates
-* Trigger eligibility re-evaluation and notifications
+- Monitor official examination websites
+- Detect new and updated notifications
+- Extract information from official notifications
+- Compare notification versions
+- Summarize important updates
+- Trigger eligibility re-evaluation and notifications
 
 ---
 
 ## Technology Stack
 
-* **Frontend:** React, JavaScript, HTML, CSS
-* **Backend:** Python, FastAPI
-* **Database:** PostgreSQL
-* **ORM:** SQLAlchemy
-* **AI:** Large Language Models
-* **Automation:** Selenium, BeautifulSoup
-* **Authentication:** JWT
-* **Tools:** Git, GitHub, VS Code
+- **Frontend:** React, JavaScript, HTML, CSS
+- **Backend:** Python, FastAPI
+- **Database:** PostgreSQL
+- **ORM:** SQLAlchemy
+- **AI:** Large Language Models
+- **Automation:** Selenium, BeautifulSoup
+- **Authentication:** JWT
+- **Tools:** Git, GitHub, VS Code
 
 ---
 
-## Project Structure
+## Development Status
+
+**Current Phase:** Architecture & Development
+
+### Completed
+
+- Requirements Analysis
+- SRS
+- SADD
+- System Architecture
+- ER Diagram
+- Database Design
+- Initial PostgreSQL Tables & Relationships
+
+### Next
+
+- Backend Development
+- Authentication
+- Eligibility Engine
+- Frontend Development
+- Automation
+- AI Integration
+- Notifications
+- Testing & Deployment
+
+---
+# Project Structure
 
 ```text
 NexStep/
@@ -61,7 +87,7 @@ NexStep/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py
-│   │
+│   │   │
 │   │   ├── models/
 │   │   ├── schemas/
 │   │   ├── routers/
@@ -100,33 +126,6 @@ NexStep/
 │
 ├── .gitignore
 └── README.md
-
-## Development Status
-
-**Current Phase:** Architecture & Development
-
-### Completed
-
-* Requirements Analysis
-* SRS
-* SADD
-* System Architecture
-* ER Diagram
-* Database Design
-* Initial PostgreSQL Tables & Relationships
-
-### Next
-
-* Backend Development
-* Authentication
-* Eligibility Engine
-* Frontend Development
-* Automation
-* AI Integration
-* Notifications
-* Testing & Deployment
-
----
 
 ## Goal
 

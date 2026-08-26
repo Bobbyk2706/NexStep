@@ -1,11 +1,6 @@
-
-
 from sqlalchemy.orm import Mapped, mapped_column,relationship
-
 from sqlalchemy import ForeignKey
 from app.models.base import Base
-
-
 class Exam(Base):
     __tablename__ = "exam"
 
