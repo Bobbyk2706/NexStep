@@ -2,8 +2,7 @@ import requests
 
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-
-
+import pymupdf
 KEYWORDS = [
     "exam",
     "examination",
@@ -101,6 +100,14 @@ def discover_exam_sources(official_url):
     response, content_type = fetch_website(
         official_url
     )
+    if is_pdf(content_type,official_url):
+        pdf_content=download_pdf(official_url)
+        text=extract_pdf_text(pdf_content)
+        return {
+            'content_type':content_type,
+            'text':text,
+            'url':url        
+        }
 
     if "text/html" not in content_type.lower():
         return []
@@ -108,4 +115,29 @@ def discover_exam_sources(official_url):
     return extract_links(
         response.text,
         official_url
+    ) 
+def is_pdf(content_type,url):
+    if 'application/pdf' in content_type.lower() or url.lower().endswith('.pdf'):
+        return True
+    return False
+def download_pdf(url):
+    response=requests.get(url,timeout=20)
+    response.raise_for_status()
+    content_type = response.headers.get(
+        "Content-Type",
+        ""
+    ).lower()
+    if "application/pdf" not in content_type:
+        raise ValueError(
+            f"Expected PDF but received: {content_type}"
+        )
+    return response.content
+def extract_pdf_text(pdf_content):
+    doc = pymupdf.open(
+        stream=pdf_content,
+        filetype="pdf"
     )
+    text = ""
+    for page in doc:
+        text += page.get_text() + "\n"
+    return text
