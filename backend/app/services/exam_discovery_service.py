@@ -29,6 +29,19 @@ def fetch_website(url):
 
     return response, content_type
 
+def is_candidate_source(url, text):
+
+    url = url.lower()
+    text = text.lower()
+
+    if (
+        any(keyword in url for keyword in KEYWORDS)
+        or
+        any(keyword in text for keyword in KEYWORDS)
+    ):
+        return True
+
+    return False
 
 def extract_links(html, base_url):
 
@@ -72,14 +85,7 @@ def extract_links(html, base_url):
             strip=True
         )
 
-        url_lower = full_url.lower()
-        text_lower = text.lower()
-
-        if not any(
-            keyword in url_lower
-            or keyword in text_lower
-            for keyword in KEYWORDS
-        ):
+        if not is_candidate_source(full_url, text):
             continue
 
         relevant_links.append({
@@ -103,16 +109,3 @@ def discover_exam_sources(official_url):
         response.text,
         official_url
     )
-def is_candidate_source(url, text):
-
-    url = url.lower()
-    text = text.lower()
-
-    if (
-        any(keyword in url for keyword in KEYWORDS)
-        or
-        any(keyword in text for keyword in KEYWORDS)
-    ):
-        return True
-
-    return False
