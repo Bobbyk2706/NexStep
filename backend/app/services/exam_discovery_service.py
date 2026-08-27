@@ -1,5 +1,118 @@
 import requests
+
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+
+
+KEYWORDS = [
+    "exam",
+    "examination",
+    "notification",
+    "calendar",
+    "active-exams",
+    "forthcoming-exams",
+]
+
+
 def fetch_website(url):
-    response=requests.get(url,timeout=20)
+    response = requests.get(
+        url,
+        timeout=20
+    )
+
     response.raise_for_status()
-    return response.text
+
+    content_type = response.headers.get(
+        "Content-Type",
+        ""
+    )
+
+    return response, content_type
+
+
+def extract_links(html, base_url):
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    links = soup.find_all("a")
+
+    seen_urls = set()
+    relevant_links = []
+
+    for link in links:
+
+        href = link.get("href")
+
+        if not href:
+            continue
+
+        if href.startswith("javascript:"):
+            continue
+
+        if href.startswith("#"):
+            continue
+
+        full_url = urljoin(
+            base_url,
+            href
+        )
+
+        if not full_url.startswith("https"):
+            continue
+
+        if full_url in seen_urls:
+            continue
+
+        seen_urls.add(full_url)
+
+        text = link.get_text(
+            strip=True
+        )
+
+        url_lower = full_url.lower()
+        text_lower = text.lower()
+
+        if not any(
+            keyword in url_lower
+            or keyword in text_lower
+            for keyword in KEYWORDS
+        ):
+            continue
+
+        relevant_links.append({
+            "url": full_url,
+            "text": text
+        })
+
+    return relevant_links
+
+
+def discover_exam_sources(official_url):
+
+    response, content_type = fetch_website(
+        official_url
+    )
+
+    if "text/html" not in content_type.lower():
+        return []
+
+    return extract_links(
+        response.text,
+        official_url
+    )
+def is_candidate_source(url, text):
+
+    url = url.lower()
+    text = text.lower()
+
+    if (
+        any(keyword in url for keyword in KEYWORDS)
+        or
+        any(keyword in text for keyword in KEYWORDS)
+    ):
+        return True
+
+    return False
