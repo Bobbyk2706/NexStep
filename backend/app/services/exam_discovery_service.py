@@ -106,7 +106,7 @@ def discover_exam_sources(official_url):
         return {
             'content_type':content_type,
             'text':text,
-            'url':url        
+            'url':official_url        
         }
 
     if "text/html" not in content_type.lower():
