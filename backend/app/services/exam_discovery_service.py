@@ -209,3 +209,4 @@ def crawl_exam_sources(official_url):
                 )
 
     return discovered_sources
+print()
