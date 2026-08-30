@@ -215,3 +215,57 @@ def crawl_exam_sources(official_url):
                 )
 
     return discovered_sources
+def extract_exam_name(text):
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    candidates = []
+
+    for line in lines:
+
+        lower = line.lower()
+
+        if "examination" not in lower and "exam" not in lower:
+            continue
+
+        if len(line) < 10 or len(line) > 150:
+            continue
+
+        score = 0
+
+        if "examination" in lower:
+            score += 3
+
+        if "exam" in lower:
+            score += 2
+
+        if any(char.isdigit() for char in line):
+            score += 1
+
+        if line.isupper():
+            score += 2
+
+        if "union public service commission" in lower:
+            score -= 5
+
+        if "previous question papers" in lower:
+            score -= 5
+
+        if "active examinations" in lower:
+            score -= 5
+
+        if "forthcoming examinations" in lower:
+            score -= 5
+
+        candidates.append((score, line))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+
+    return candidates[0][1]
