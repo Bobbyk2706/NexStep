@@ -111,11 +111,17 @@ def discover_exam_sources(official_url):
 
     if "text/html" not in content_type.lower():
         return []
-
-    return extract_links(
+    links = extract_links(
         response.text,
         official_url
-    ) 
+    )
+
+    return {
+        "url": official_url,
+        "content_type": content_type,
+        "text": response.text,
+        "links": links
+    }
 def is_pdf(content_type,url):
     if 'application/pdf' in content_type.lower() or url.lower().endswith('.pdf'):
         return True
