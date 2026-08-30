@@ -1,19 +1,11 @@
 import requests
-
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import pymupdf
-KEYWORDS = [
-    "exam",
-    "examination",
-    "notification",
-    "calendar",
-    "active-exams",
-    "forthcoming-exams",
-]
 
 
 def fetch_website(url):
+
     response = requests.get(
         url,
         timeout=20
@@ -28,19 +20,6 @@ def fetch_website(url):
 
     return response, content_type
 
-def is_candidate_source(url, text):
-
-    url = url.lower()
-    text = text.lower()
-
-    if (
-        any(keyword in url for keyword in KEYWORDS)
-        or
-        any(keyword in text for keyword in KEYWORDS)
-    ):
-        return True
-
-    return False
 
 def extract_links(html, base_url):
 
@@ -84,9 +63,6 @@ def extract_links(html, base_url):
             strip=True
         )
 
-        if not is_candidate_source(full_url, text):
-            continue
-
         relevant_links.append({
             "url": full_url,
             "text": text
@@ -95,22 +71,82 @@ def extract_links(html, base_url):
     return relevant_links
 
 
+def is_pdf(content_type, url):
+
+    if (
+        "application/pdf" in content_type.lower()
+        or
+        url.lower().endswith(".pdf")
+    ):
+        return True
+
+    return False
+
+
+def download_pdf(url):
+
+    response = requests.get(
+        url,
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    content_type = response.headers.get(
+        "Content-Type",
+        ""
+    ).lower()
+
+    if "application/pdf" not in content_type:
+        raise ValueError(
+            f"Expected PDF but received: {content_type}"
+        )
+
+    return response.content
+
+
+def extract_pdf_text(pdf_content):
+
+    doc = pymupdf.open(
+        stream=pdf_content,
+        filetype="pdf"
+    )
+
+    text = ""
+
+    for page in doc:
+        text += page.get_text() + "\n"
+
+    doc.close()
+
+    return text
+
+
 def discover_exam_sources(official_url):
 
     response, content_type = fetch_website(
         official_url
     )
-    if is_pdf(content_type,official_url):
-        pdf_content=download_pdf(official_url)
-        text=extract_pdf_text(pdf_content)
+
+    if is_pdf(content_type, official_url):
+
+        pdf_content = download_pdf(
+            official_url
+        )
+
+        text = extract_pdf_text(
+            pdf_content
+        )
+
         return {
-            'content_type':content_type,
-            'text':text,
-            'url':official_url        
+            "url": official_url,
+            "content_type": content_type,
+            "text": text
         }
 
     if "text/html" not in content_type.lower():
         return []
+
     links = extract_links(
         response.text,
         official_url
@@ -122,31 +158,8 @@ def discover_exam_sources(official_url):
         "text": response.text,
         "links": links
     }
-def is_pdf(content_type,url):
-    if 'application/pdf' in content_type.lower() or url.lower().endswith('.pdf'):
-        return True
-    return False
-def download_pdf(url):
-    response=requests.get(url,timeout=20)
-    response.raise_for_status()
-    content_type = response.headers.get(
-        "Content-Type",
-        ""
-    ).lower()
-    if "application/pdf" not in content_type:
-        raise ValueError(
-            f"Expected PDF but received: {content_type}"
-        )
-    return response.content
-def extract_pdf_text(pdf_content):
-    doc = pymupdf.open(
-        stream=pdf_content,
-        filetype="pdf"
-    )
-    text = ""
-    for page in doc:
-        text += page.get_text() + "\n"
-    return text
+
+
 MAX_DEPTH = 2
 
 
@@ -170,16 +183,28 @@ def crawl_exam_sources(official_url):
         visited.add(current_url)
 
         try:
-            response, content_type = fetch_website(current_url)
+            response, content_type = fetch_website(
+                current_url
+            )
+
         except Exception as e:
-            print("Failed:", current_url, e)
+            print(
+                "Failed:",
+                current_url,
+                e
+            )
             continue
 
         if is_pdf(content_type, current_url):
 
             try:
-                pdf_content = download_pdf(current_url)
-                text = extract_pdf_text(pdf_content)
+                pdf_content = download_pdf(
+                    current_url
+                )
+
+                text = extract_pdf_text(
+                    pdf_content
+                )
 
                 discovered_sources.append({
                     "url": current_url,
@@ -188,7 +213,11 @@ def crawl_exam_sources(official_url):
                 })
 
             except Exception as e:
-                print("PDF failed:", current_url, e)
+                print(
+                    "PDF failed:",
+                    current_url,
+                    e
+                )
 
             continue
 
@@ -210,59 +239,9 @@ def crawl_exam_sources(official_url):
             discovered_sources.append(link)
 
             if depth < MAX_DEPTH:
+
                 to_visit.append(
                     (next_url, depth + 1)
                 )
 
     return discovered_sources
-def extract_exam_name(text):
-
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
-
-    candidates = []
-
-    for line in lines:
-
-        lower = line.lower()
-
-        if "examination" not in lower and "exam" not in lower:
-            continue
-
-        if len(line) < 10 or len(line) > 150:
-            continue
-
-        score = 0
-
-        if "examination" in lower:
-            score += 3
-
-        if "exam" in lower:
-            score += 2
-
-        if any(char.isdigit() for char in line):
-            score += 1
-
-        if line.isupper():
-            score += 2
-
-        if "previous question papers" in lower:
-            score -= 5
-
-        if "active examinations" in lower:
-            score -= 5
-
-        if "forthcoming examinations" in lower:
-            score -= 5
-
-        candidates.append((score, line))
-
-    if not candidates:
-        return None
-
-    candidates.sort(reverse=True)
-
-    return candidates[0][1]
