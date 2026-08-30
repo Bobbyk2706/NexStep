@@ -249,9 +249,6 @@ def extract_exam_name(text):
         if line.isupper():
             score += 2
 
-        if "union public service commission" in lower:
-            score -= 5
-
         if "previous question papers" in lower:
             score -= 5
 
