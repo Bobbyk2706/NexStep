@@ -13,6 +13,22 @@ class Student(Base):
     nationality: Mapped[str]
     state: Mapped[str]
     gender: Mapped[str]
+
+
+    # Added for auth integration (see database/migrations/0001_add_auth_columns.sql).
+    # NULL/'' account_status is treated as active; only an explicit
+    # 'suspended'/'inactive'/'disabled' blocks login.
+    account_status: Mapped[str | None] = mapped_column(default="active")
+    # Bumped on every refresh-token issuance/rotation and on logout, so a
+    # refresh token's embedded "trv" claim can be checked against it to
+    # revoke old sessions.
+    token_version: Mapped[str | None]
+
+
+
+
+
+
     educations:Mapped[list['Education']]=relationship(
         back_populates='student'
     )
