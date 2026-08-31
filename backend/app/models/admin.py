@@ -17,6 +17,11 @@ class Admin(Base):
     password_hash: Mapped[str]
     account_status: Mapped[str | None]
 
+
+    # Added for auth integration (see database/migrations/0001_add_auth_columns.sql).
+    # Same purpose as Student.token_version — see that model for details.
+    token_version: Mapped[str | None]
+
     updated_timestamp: Mapped[datetime | None]
     created_timestamp: Mapped[datetime | None]
 
