@@ -1,3 +1,4 @@
+import re
 def extract_exam_name(text):
 
     lines = [
@@ -54,3 +55,10 @@ def extract_exam_name(text):
     )
 
     return candidates[0][1]
+def extract_dates(text):
+
+    pattern = r"\d{1,2}[ ,]\w+[ ,]\d{4}"
+
+    matches = re.findall(pattern, text)
+
+    return matches
