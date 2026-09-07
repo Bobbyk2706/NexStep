@@ -102,51 +102,71 @@ import re
 from datetime import datetime
 
 
+import re
+from datetime import datetime
+
+
 def normalize_date(date_string):
 
     date_string = date_string.strip()
 
-    formats = [
-        # Day Month Year
-        "%d %B %Y",      # 10 February 2026
-        "%d %b %Y",      # 10 Feb 2026
-        "%dst %B %Y",    # 1st February 2026
-        "%dnd %B %Y",    # 2nd February 2026
-        "%drd %B %Y",    # 3rd February 2026
-        "%dth %B %Y",    # 10th February 2026
-
-        "%dst %b %Y",     # 1st Feb 2026
-        "%dnd %b %Y",     # 2nd Feb 2026
-        "%drd %b %Y",     # 3rd Feb 2026
-        "%dth %b %Y",     # 10th Feb 2026
-
-        # Month Day Year
-        "%B %d, %Y",      # February 10, 2026
-        "%B %d %Y",       # February 10 2026
-        "%b %d, %Y",      # Feb 10, 2026
-        "%b %d %Y",       # Feb 10 2026
-
-        # Numeric
-        "%d/%m/%Y",       # 10/02/2026
-        "%d/%m/%y",       # 10/02/26
-        "%d-%m-%Y",       # 10-02-2026
-        "%d-%m-%y",       # 10-02-26
-        "%d.%m.%Y",       # 10.02.2026
-        "%d.%m.%y",       # 10.02.26
-
-        # ISO
-        "%Y-%m-%d",       # 2026-02-10
-        "%Y/%m/%d",       # 2026/02/10
-        "%Y.%m.%d",       # 2026.02.10
-    ]
-
-    # Remove ordinal suffixes: 1st → 1, 2nd → 2, etc.
     date_string = re.sub(
         r"(\d{1,2})(st|nd|rd|th)",
         r"\1",
         date_string,
         flags=re.IGNORECASE
     )
+
+    time_pattern = (
+        r"\b\d{1,2}(?::\d{2}(?::\d{2})?)?"
+        r"\s*(?:AM|PM|am|pm|hrs?|hours?)?\b"
+    )
+
+    time_match = re.search(
+        time_pattern,
+        date_string,
+        re.IGNORECASE
+    )
+
+    time_value = None
+
+    if time_match and (
+        ":" in time_match.group()
+        or re.search(r"\b(?:AM|PM)\b", time_match.group(), re.IGNORECASE)
+    ):
+        time_value = time_match.group().strip()
+
+        date_string = (
+            date_string[:time_match.start()]
+            + date_string[time_match.end():]
+        ).strip()
+
+        date_string = re.sub(
+            r"\s+(at|up to|till|until)\s*$",
+            "",
+            date_string,
+            flags=re.IGNORECASE
+        ).strip(" ,.-")
+
+    formats = [
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y",
+        "%B %d %Y",
+        "%b %d, %Y",
+        "%b %d %Y",
+        "%d/%m/%Y",
+        "%d/%m/%y",
+        "%d-%m-%Y",
+        "%d-%m-%y",
+        "%d.%m.%Y",
+        "%d.%m.%y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y.%m.%d",
+    ]
+
+    normalized_date = None
 
     for date_format in formats:
 
@@ -156,9 +176,53 @@ def normalize_date(date_string):
                 date_format
             )
 
-            return dt.strftime("%Y-%m-%d")
+            normalized_date = dt.strftime("%Y-%m-%d")
+            break
 
         except ValueError:
             continue
 
-    return None
+    if normalized_date is None:
+        return None
+
+    normalized_time = None
+
+    if time_value:
+
+        time_value = re.sub(
+            r"\s*(hrs?|hours?)\s*$",
+            "",
+            time_value,
+            flags=re.IGNORECASE
+        ).strip()
+
+        if re.fullmatch(r"24:00(?::00)?", time_value):
+            normalized_time = "24:00"
+
+        else:
+
+            time_formats = [
+                "%I:%M %p",
+                "%I %p",
+                "%H:%M",
+                "%H:%M:%S",
+            ]
+
+            for time_format in time_formats:
+
+                try:
+                    time_obj = datetime.strptime(
+                        time_value.upper(),
+                        time_format
+                    )
+
+                    normalized_time = time_obj.strftime("%H:%M")
+                    break
+
+                except ValueError:
+                    continue
+
+    return {
+        "date": normalized_date,
+        "time": normalized_time
+    }
