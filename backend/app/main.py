@@ -44,6 +44,7 @@ async def http_exception_handler(request, exc: HTTPException):
     )
 
 
+
 @app.get("/")
 def root():
     return {"status": "ok", "docs": "/docs"}
