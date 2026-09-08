@@ -106,6 +106,10 @@ import re
 from datetime import datetime
 
 
+import re
+from datetime import datetime
+
+
 def normalize_date(date_string):
 
     date_string = date_string.strip()
@@ -118,8 +122,15 @@ def normalize_date(date_string):
     )
 
     time_pattern = (
-        r"\b\d{1,2}(?::\d{2}(?::\d{2})?)?"
-        r"\s*(?:AM|PM|am|pm|hrs?|hours?)?\b"
+        r"\b(?:"
+        r"\d{1,2}:\d{2}(?::\d{2})?"
+        r"|"
+        r"\d{1,2}\s*(?:AM|PM|am|pm)"
+        r"|"
+        r"\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)"
+        r"|"
+        r"24:00(?::00)?"
+        r")\b"
     )
 
     time_match = re.search(
@@ -130,10 +141,7 @@ def normalize_date(date_string):
 
     time_value = None
 
-    if time_match and (
-        ":" in time_match.group()
-        or re.search(r"\b(?:AM|PM)\b", time_match.group(), re.IGNORECASE)
-    ):
+    if time_match:
         time_value = time_match.group().strip()
 
         date_string = (
@@ -226,3 +234,82 @@ def normalize_date(date_string):
         "date": normalized_date,
         "time": normalized_time
     }
+def extract_date_context(text):
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    results = []
+
+    for line in lines:
+
+        dates = extract_dates(line)
+
+        for date in dates:
+
+            normalized = normalize_date(date)
+
+            if normalized is None:
+                continue
+
+            results.append({
+                "date": normalized["date"],
+                "time": normalized["time"],
+                "context": line
+            })
+
+    return results
+def extract_document_content(text):
+
+    return {
+        "text": text,
+        "date_contexts": extract_date_context(text)
+    }
+def extract_sections(text):
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    sections = []
+    current_heading = None
+    current_content = []
+
+    for line in lines:
+
+        is_heading = (
+            len(line) <= 100
+            and (
+                line.isupper()
+                or re.fullmatch(r"[A-Z][A-Za-z\s&()/,-]{2,}", line)
+            )
+        )
+
+        if is_heading:
+
+            if current_heading is not None:
+                sections.append({
+                    "heading": current_heading,
+                    "content": " ".join(current_content)
+                })
+
+            current_heading = line
+            current_content = []
+
+        else:
+
+            if current_heading is not None:
+                current_content.append(line)
+
+    if current_heading is not None:
+        sections.append({
+            "heading": current_heading,
+            "content": " ".join(current_content)
+        })
+
+    return sections
