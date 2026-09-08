@@ -9,10 +9,17 @@ class Student(Base):
     name:Mapped[str]
     email: Mapped[str]
     password_hash: Mapped[str]
-    date_of_birth: Mapped[date]
-    nationality: Mapped[str]
-    state: Mapped[str]
-    gender: Mapped[str]
+    # These four used to be required at signup. The frontend's actual
+    # signup only collects name/email/password; DOB/nationality/state
+    # are filled in later via PUT /student/profile, and gender isn't
+    # collected by the profile form at all yet (see
+    # database/migrations/0002_profile_schema.sql). Nullable here so
+    # gender-based eligibility rules simply won't fire until/unless the
+    # frontend adds that field.
+    date_of_birth: Mapped[date | None]
+    nationality: Mapped[str | None]
+    state: Mapped[str | None]
+    gender: Mapped[str | None]
 
 
     # Added for auth integration (see database/migrations/0001_add_auth_columns.sql).
@@ -31,6 +38,9 @@ class Student(Base):
 
     educations:Mapped[list['Education']]=relationship(
         back_populates='student'
+    )
+    work_experiences: Mapped[list["WorkExperience"]] = relationship(
+        back_populates="student"
     )
     eligibility_records: Mapped[list["StudentExamEligibility"]] = relationship(
     back_populates="student"
