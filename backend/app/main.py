@@ -1,8 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.routers.auth_router import router as auth_router
+from app.routers.eligibility_router import router as eligibility_router
+from app.routers.profile_router import router as profile_router
 from app.routers.eligibility_router import router as eligibility_router
 from app.routers.profile_router import router as profile_router
 
