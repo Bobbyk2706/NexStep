@@ -4,6 +4,8 @@ from sqlalchemy import ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+from app.models.eligibility_rule import EligibilityRule
+from app.models.official_notification import OfficialNotification
 
 
 class EligibilityRuleGroup(Base):
