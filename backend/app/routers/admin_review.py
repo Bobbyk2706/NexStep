@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.services.review import (
+from app.ai.review import (
     approve_extraction,
     reject_extraction,
 )
