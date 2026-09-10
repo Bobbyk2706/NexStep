@@ -7,7 +7,7 @@ from app.routers.eligibility_router import router as eligibility_router
 from app.routers.profile_router import router as profile_router
 
 app = FastAPI(title="NexStep API")
-app.include_router(admin_review_router)
+
 
 # Without this, the browser blocks every request from the Vite dev
 # server (localhost:5173) to this API (localhost:8000) — different
@@ -30,7 +30,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api")
 app.include_router(eligibility_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
-
+app.include_router(admin_review_router)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc: HTTPException):
