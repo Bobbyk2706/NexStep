@@ -1,5 +1,6 @@
 from datetime import datetime
-
+from app.ai.llm_client import extract_exam_information
+from app.ai.validation import validate_exam_information
 from app.database.session import SessionLocal
 from app.models.official_notification import OfficialNotification
 from app.models.extraction_history import ExtractionHistory
@@ -94,3 +95,12 @@ def reject_extraction(extraction_id, feedback):
     db.close()
 
     return extraction
+def retry_extraction(extraction_id):
+    db=SessionLocal()
+    extraction=db.get(ExtractionHistory,extraction_id)
+    if extraction is None:
+        db.close()
+        raise ValueError("Extraction is not found")
+    if extraction.extraction_status!="REJECTED":
+        db.close()
+        raise ValueError
