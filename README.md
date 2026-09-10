@@ -79,6 +79,14 @@ It combines **AI, automation, and rule-based eligibility evaluation** to provide
 - Testing & Deployment
 
 ---
+## Goal
+
+NexStep aims to transform examination discovery from a **manual search process** into a **personalized and automated service**.
+
+> **Instead of searching multiple websites to find opportunities, students can find the examinations they are eligible for in one place.**
+
+---
+
 # Project Structure
 
 ```text
@@ -126,15 +134,3 @@ NexStep/
 │
 ├── .gitignore
 └── README.md
-
-## Goal
-
-NexStep aims to transform examination discovery from a **manual search process** into a **personalized and automated service**.
-
-> **Instead of searching multiple websites to find opportunities, students can find the examinations they are eligible for in one place.**
-
----
-
-## License
-
-This project is developed for educational and research purposes.
