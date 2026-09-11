@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from app.ai.review import (
     approve_extraction,
     reject_extraction,
+    retry_extraction
 )
 from app.database.session import SessionLocal
 from app.models.extraction_history import ExtractionHistory
@@ -81,4 +82,16 @@ def reject_extraction_review(
         "extraction_id": extraction.extraction_id,
         "status": extraction.extraction_status,
         "feedback": request.feedback
+    }
+@router.post("/{extraction_id}/retry")
+def retry_extraction_review(
+    extraction_id: int
+):
+    extraction = retry_extraction(extraction_id)
+
+    return {
+        "message": "Extraction retry completed.",
+        "extraction_id": extraction.extraction_id,
+        "status": extraction.extraction_status,
+        "extraction_type": extraction.extraction_type
     }
