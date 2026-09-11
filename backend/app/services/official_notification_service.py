@@ -37,3 +37,4 @@ def off_not(
         exam.official_notifications.append(official_notification)
         s.add(official_notification)
         s.commit()
+        return official_notification.notification_id
