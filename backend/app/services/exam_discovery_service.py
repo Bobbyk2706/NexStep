@@ -1,11 +1,15 @@
+import os
 import requests
+from pathlib import Path
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import pymupdf
+
+STORAGE_DIR = Path("storage/notifications")
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def fetch_website(url):
-
     response = requests.get(
         url,
         timeout=20
@@ -22,7 +26,6 @@ def fetch_website(url):
 
 
 def extract_links(html, base_url):
-
     soup = BeautifulSoup(
         html,
         "html.parser"
@@ -34,7 +37,6 @@ def extract_links(html, base_url):
     relevant_links = []
 
     for link in links:
-
         href = link.get("href")
 
         if not href:
@@ -59,9 +61,7 @@ def extract_links(html, base_url):
 
         seen_urls.add(full_url)
 
-        text = link.get_text(
-            strip=True
-        )
+        text = link.get_text(strip=True)
 
         relevant_links.append({
             "url": full_url,
@@ -72,19 +72,32 @@ def extract_links(html, base_url):
 
 
 def is_pdf(content_type, url):
-
     if (
         "application/pdf" in content_type.lower()
-        or
-        url.lower().endswith(".pdf")
+        or url.lower().endswith(".pdf")
     ):
         return True
 
     return False
 
 
-def download_pdf(url):
+def get_pdf_filename(url):
+    parsed_url = urlparse(url)
 
+    filename = os.path.basename(
+        parsed_url.path
+    )
+
+    if not filename:
+        filename = "document.pdf"
+
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+
+    return filename
+
+
+def download_pdf(url):
     response = requests.get(
         url,
         timeout=20
@@ -102,11 +115,21 @@ def download_pdf(url):
             f"Expected PDF but received: {content_type}"
         )
 
-    return response.content
+    pdf_content = response.content
+
+    filename = get_pdf_filename(url)
+    file_path = STORAGE_DIR / filename
+
+    with open(file_path, "wb") as file:
+        file.write(pdf_content)
+
+    return {
+        "content": pdf_content,
+        "path": str(file_path)
+    }
 
 
 def extract_pdf_text(pdf_content):
-
     doc = pymupdf.open(
         stream=pdf_content,
         filetype="pdf"
@@ -123,25 +146,27 @@ def extract_pdf_text(pdf_content):
 
 
 def discover_exam_sources(official_url):
-
     response, content_type = fetch_website(
         official_url
     )
 
-    if is_pdf(content_type, official_url):
-
-        pdf_content = download_pdf(
+    if is_pdf(
+        content_type,
+        official_url
+    ):
+        pdf = download_pdf(
             official_url
         )
 
         text = extract_pdf_text(
-            pdf_content
+            pdf["content"]
         )
 
         return {
             "url": official_url,
             "content_type": content_type,
-            "text": text
+            "text": text,
+            "pdf_path": pdf["path"]
         }
 
     if "text/html" not in content_type.lower():
@@ -164,14 +189,15 @@ MAX_DEPTH = 2
 
 
 def crawl_exam_sources(official_url):
-
     visited = set()
-    to_visit = [(official_url, 0)]
+
+    to_visit = [
+        (official_url, 0)
+    ]
 
     discovered_sources = []
 
     while to_visit:
-
         current_url, depth = to_visit.pop(0)
 
         if current_url in visited:
@@ -195,21 +221,24 @@ def crawl_exam_sources(official_url):
             )
             continue
 
-        if is_pdf(content_type, current_url):
-
+        if is_pdf(
+            content_type,
+            current_url
+        ):
             try:
-                pdf_content = download_pdf(
+                pdf = download_pdf(
                     current_url
                 )
 
                 text = extract_pdf_text(
-                    pdf_content
+                    pdf["content"]
                 )
 
                 discovered_sources.append({
                     "url": current_url,
                     "content_type": content_type,
-                    "text": text
+                    "text": text,
+                    "pdf_path": pdf["path"]
                 })
 
             except Exception as e:
@@ -230,7 +259,6 @@ def crawl_exam_sources(official_url):
         )
 
         for link in links:
-
             next_url = link["url"]
 
             if next_url in visited:
@@ -239,9 +267,11 @@ def crawl_exam_sources(official_url):
             discovered_sources.append(link)
 
             if depth < MAX_DEPTH:
-
                 to_visit.append(
-                    (next_url, depth + 1)
+                    (
+                        next_url,
+                        depth + 1
+                    )
                 )
 
     return discovered_sources
