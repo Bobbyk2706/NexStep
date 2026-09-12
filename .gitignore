@@ -22,3 +22,5 @@ node_modules/
 *.egg-info/
 # Runtime files
 storage/notifications/
+#test files
+tests/
