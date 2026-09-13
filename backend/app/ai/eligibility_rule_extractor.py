@@ -21,37 +21,91 @@ def extract_eligibility_rules(
 Extract the eligibility requirements from the following
 official examination document.
 
-Return only eligibility requirements that are explicitly
-supported by the document.
+Return the requirements as a structured logical rule tree.
 
 Rules:
-- Do not invent or assume requirements.
-- Convert each requirement into a structured rule.
-- Use these attribute names when applicable:
-  CGPA
-  Percentage
-  Specialization
-  Date of Birth
-  Nationality
-  State
-  Educational Qualification
-  Work Experience
-- Use clear operators such as:
-  =
-  !=
-  >
-  >=
-  <
-  <=
-  IN
-- Keep the value as a string.
-- If multiple rules must ALL be satisfied, put them in
-  the same group with logical_operator = "AND".
-- If alternatives exist, use separate groups where
-  appropriate.
-- Extract every explicitly stated eligibility requirement.
-- Do not include application instructions, exam dates,
-  syllabus, fees, or unrelated information.
+
+1. Extract only eligibility requirements that are explicitly
+   supported by the document.
+
+2. Do not invent or assume requirements.
+
+3. Use these attribute names when applicable:
+   CGPA
+   Percentage
+   Specialization
+   Date of Birth
+   Nationality
+   State
+   Educational Qualification
+   Work Experience
+
+4. Use only these operators:
+   =
+   !=
+   >
+   >=
+   <
+   <=
+
+5. Do NOT use the IN operator.
+
+6. If the document says that an attribute can have multiple
+   acceptable values, represent those alternatives using an
+   OR child group.
+
+   Example:
+
+   Nationality can be India, Nepal, or Bhutan
+
+   becomes:
+
+   OR
+   ├── Nationality = India
+   ├── Nationality = Nepal
+   └── Nationality = Bhutan
+
+7. If multiple requirements must all be satisfied, use an
+   AND group.
+
+   Example:
+
+   Education = Graduate
+   AND
+   CGPA >= 7.0
+
+8. Use child_groups whenever nested logical conditions are
+   required.
+
+   Example:
+
+   Education = Graduate
+   AND
+   (
+       Nationality = India
+       OR
+       Nationality = Nepal
+   )
+
+   should be represented as:
+
+   Root group: AND
+       Rule: Education = Graduate
+       Child group: OR
+           Rule: Nationality = India
+           Rule: Nationality = Nepal
+
+9. Preserve the logical meaning of the official document.
+
+10. Extract every explicitly stated eligibility requirement.
+
+11. Do not include:
+    - application instructions
+    - exam dates
+    - syllabus
+    - fees
+    - document submission instructions
+    - unrelated information
 
 Official examination document:
 
