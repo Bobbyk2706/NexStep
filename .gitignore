@@ -21,6 +21,6 @@ node_modules/
 # Python packaging
 *.egg-info/
 # Runtime files
-storage/notifications/
+storage/
 #test files
 tests/
