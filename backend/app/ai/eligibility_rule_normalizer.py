@@ -21,13 +21,31 @@ ATTRIBUTE_MAP = {
 OPERATOR_MAP = {
     "=": "=",
     "==": "=",
+    "equal": "=",
+    "equals": "=",
+    "equal to": "=",
+
     "!=": "!=",
+    "not equal": "!=",
+    "not equal to": "!=",
+
     ">": ">",
+    "greater than": ">",
+    "above": ">",
+
     ">=": ">=",
+    "greater than or equal to": ">=",
+    "at least": ">=",
+    "minimum": ">=",
+
     "<": "<",
+    "less than": "<",
+    "below": "<",
+
     "<=": "<=",
-    "in": "IN",
-    "IN": "IN",
+    "less than or equal to": "<=",
+    "at most": "<=",
+    "maximum": "<=",
 }
 
 
