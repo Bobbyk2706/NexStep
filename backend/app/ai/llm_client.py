@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from google import genai
 
-from app.ai.schemas import ExamInformation
+from app.ai.exam_schemas import ExamInformation
 
 load_dotenv()
 

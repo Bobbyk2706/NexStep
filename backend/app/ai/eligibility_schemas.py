@@ -12,6 +12,9 @@ class EligibilityRuleGroupData(BaseModel):
     rules: list[EligibilityRuleData] = Field(
         default_factory=list
     )
+    child_groups: list["EligibilityRuleGroupData"] = Field(
+        default_factory=list
+    )
 
 
 class EligibilityRulesData(BaseModel):

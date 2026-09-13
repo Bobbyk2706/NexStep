@@ -1,7 +1,9 @@
 from datetime import datetime
 import re
+
 from app.ai.eligibility_schemas import (
     EligibilityRuleData,
+    EligibilityRuleGroupData,
     EligibilityRulesData,
 )
 
@@ -60,29 +62,32 @@ def normalize_attribute(attribute: str) -> str:
     return ATTRIBUTE_MAP[key]
 
 
-def normalize_operator(operator: str) -> str:
-    key = operator.strip()
+def normalize_operator(value: str) -> str:
+    value = value.strip()
 
-    if key not in OPERATOR_MAP:
-        raise ValueError(
-            f"Unsupported eligibility operator: {operator}"
-        )
+    normalized_value = value.lower()
 
-    return OPERATOR_MAP[key]
+    if normalized_value in OPERATOR_MAP:
+        return OPERATOR_MAP[normalized_value]
 
-
-import re
-from datetime import datetime
+    raise ValueError(
+        f"Unsupported eligibility operator: {value}"
+    )
 
 
 def normalize_date(value: str) -> str:
     value = value.strip()
 
-    # Remove ordinal suffixes:
-    # 1st → 1
-    # 2nd → 2
-    # 3rd → 3
-    # 4th → 4
+    # Already normalized
+    try:
+        parsed_date = datetime.strptime(
+            value,
+            "%Y-%m-%d"
+        )
+        return parsed_date.strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+
     cleaned_value = re.sub(
         r"(\d+)(st|nd|rd|th)",
         r"\1",
@@ -93,6 +98,8 @@ def normalize_date(value: str) -> str:
     formats = [
         "%d %B, %Y",
         "%d %B %Y",
+        "%B %d, %Y",
+        "%B %d %Y",
     ]
 
     for date_format in formats:
@@ -101,17 +108,15 @@ def normalize_date(value: str) -> str:
                 cleaned_value,
                 date_format
             )
-
-            return parsed_date.strftime(
-                "%Y-%m-%d"
-            )
-
+            return parsed_date.strftime("%Y-%m-%d")
         except ValueError:
             continue
 
     raise ValueError(
         f"Unable to normalize date: {value}"
     )
+
+
 def normalize_rule(
     rule: EligibilityRuleData
 ) -> EligibilityRuleData:
@@ -136,23 +141,37 @@ def normalize_rule(
     )
 
 
+def normalize_rule_group(
+    group: EligibilityRuleGroupData
+) -> EligibilityRuleGroupData:
+
+    logical_operator = group.logical_operator.strip().upper()
+
+    normalized_rules = [
+        normalize_rule(rule)
+        for rule in group.rules
+    ]
+
+    normalized_child_groups = [
+        normalize_rule_group(child_group)
+        for child_group in group.child_groups
+    ]
+
+    return EligibilityRuleGroupData(
+        logical_operator=logical_operator,
+        rules=normalized_rules,
+        child_groups=normalized_child_groups
+    )
+
+
 def normalize_eligibility_rules(
     data: EligibilityRulesData
 ) -> EligibilityRulesData:
 
-    normalized_groups = []
-
-    for group in data.rule_groups:
-
-        normalized_rules = [
-            normalize_rule(rule)
-            for rule in group.rules
-        ]
-
-        normalized_groups.append({
-            "logical_operator": group.logical_operator.upper(),
-            "rules": normalized_rules
-        })
+    normalized_groups = [
+        normalize_rule_group(group)
+        for group in data.rule_groups
+    ]
 
     return EligibilityRulesData(
         rule_groups=normalized_groups
