@@ -8,7 +8,13 @@ from app.models.extraction_history import ExtractionHistory
 
 from app.ai.llm_client import extract_exam_information
 from app.ai.validation import validate_exam_information
-
+from app.ai.aggregated_extraction_result import (
+    AggregatedExtractionResult,
+)
+from app.ai.extraction_serialization import (
+    serialize_aggregated_extraction,
+    deserialize_aggregated_extraction,
+)
 from app.services.exam_discovery_service import (
     fetch_website,
     is_pdf,
@@ -376,3 +382,56 @@ ORIGINAL OFFICIAL DOCUMENT:
     db.close()
 
     return new_extraction
+def create_pending_extraction(
+    notification_id: int,
+    source_pdf_path: str,
+    result: AggregatedExtractionResult,
+    ai_summary: str | None = None,
+):
+    with SessionLocal() as db:
+
+        extracted_content = serialize_aggregated_extraction(
+            result
+        )
+
+        extraction = ExtractionHistory(
+            notification_id=notification_id,
+            extraction_type="COMPLETE_EXTRACTION",
+            source_pdf_path=source_pdf_path,
+            extracted_content=extracted_content,
+            ai_summary=ai_summary,
+            change_detected=False,
+            change_details=None,
+            extraction_status="PENDING",
+            created_at=datetime.now(),
+        )
+
+        db.add(extraction)
+        db.commit()
+        db.refresh(extraction)
+
+        return extraction
+    def load_extraction_result(
+    extraction_id: int,
+) -> AggregatedExtractionResult:
+
+    with SessionLocal() as db:
+
+        extraction = db.get(
+            ExtractionHistory,
+            extraction_id,
+        )
+
+        if extraction is None:
+            raise ValueError(
+                "Extraction not found."
+            )
+
+        if not extraction.extracted_content:
+            raise ValueError(
+                "Extraction content is empty."
+            )
+
+        return deserialize_aggregated_extraction(
+            extraction.extracted_content
+        )
