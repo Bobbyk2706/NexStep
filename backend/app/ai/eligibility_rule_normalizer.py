@@ -64,8 +64,11 @@ def normalize_attribute(attribute: str) -> str:
 
 def normalize_operator(value: str) -> str:
     value = value.strip()
-
     normalized_value = value.lower()
+
+    # Normalize repeated equality signs.
+    if re.fullmatch(r"=+", normalized_value):
+        return "="
 
     if normalized_value in OPERATOR_MAP:
         return OPERATOR_MAP[normalized_value]
