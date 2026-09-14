@@ -411,8 +411,8 @@ def create_pending_extraction(
         db.refresh(extraction)
 
         return extraction
-    def load_extraction_result(
-    extraction_id: int,
+def load_extraction_result(
+extraction_id: int,
 ) -> AggregatedExtractionResult:
 
     with SessionLocal() as db:
