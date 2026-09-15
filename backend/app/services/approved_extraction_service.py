@@ -19,7 +19,9 @@ from app.ai.extraction_serialization import (
 )
 from app.database.session import SessionLocal
 from app.models.eligibility_rule import EligibilityRule
-from app.models.eligibility_rule_group import EligibilityRuleGroup
+from app.models.eligibility_rule_group import (
+    EligibilityRuleGroup,
+)
 from app.models.exam_date import ExamDate
 from app.models.extraction_history import ExtractionHistory
 from app.models.official_notification import OfficialNotification
@@ -28,29 +30,116 @@ from app.services.eligibility_rule_service import (
 )
 
 
-PENDING_STATUS = "PENDING"
-APPROVED_STATUS = "APPROVED"
-
-
 def _parse_date(
     value: str | None,
 ) -> date | None:
     """
-    Convert a normalized YYYY-MM-DD string into a
-    Python date object.
+    Convert an ISO date string into a Python date.
 
     None remains None.
+    Invalid ISO dates raise ValueError.
     """
 
     if value is None:
         return None
 
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
+    return date.fromisoformat(value)
+
+
+def _get_locked_extraction(
+    session: Session,
+    extraction_id: int,
+) -> ExtractionHistory:
+    """
+    Load the extraction and lock its row for this transaction.
+    """
+
+    extraction = session.scalar(
+        select(ExtractionHistory)
+        .where(
+            ExtractionHistory.extraction_id
+            == extraction_id
+        )
+        .with_for_update()
+    )
+
+    if extraction is None:
         raise ValueError(
-            f"Invalid date value: {value}"
-        ) from exc
+            "Extraction not found."
+        )
+
+    return extraction
+
+
+def _get_locked_notification(
+    session: Session,
+    notification_id: int,
+) -> OfficialNotification:
+    """
+    Load the notification and lock its row.
+
+    Locking the notification gives us a stable parent row
+    while checking which extraction version is latest.
+    """
+
+    notification = session.scalar(
+        select(OfficialNotification)
+        .where(
+            OfficialNotification.notification_id
+            == notification_id
+        )
+        .with_for_update()
+    )
+
+    if notification is None:
+        raise ValueError(
+            "Official notification not found."
+        )
+
+    return notification
+
+
+def _ensure_latest_extraction(
+    session: Session,
+    extraction: ExtractionHistory,
+) -> None:
+    """
+    Ensure that the extraction being approved is the
+    newest extraction for its notification.
+
+    The newest extraction is determined by the highest
+    extraction_id.
+
+    An older extraction must never be approved.
+    """
+
+    latest_extraction_id = session.scalar(
+        select(
+            ExtractionHistory.extraction_id
+        )
+        .where(
+            ExtractionHistory.notification_id
+            == extraction.notification_id
+        )
+        .order_by(
+            ExtractionHistory.extraction_id.desc()
+        )
+        .limit(1)
+    )
+
+    if latest_extraction_id is None:
+        raise ValueError(
+            "No extraction history found for notification."
+        )
+
+    if (
+        latest_extraction_id
+        != extraction.extraction_id
+    ):
+        raise ValueError(
+            "This extraction is no longer the latest "
+            "extraction for the notification."
+        )
 
 
 def _delete_existing_eligibility_tree(
@@ -58,90 +147,39 @@ def _delete_existing_eligibility_tree(
     notification_id: int,
 ) -> None:
     """
-    Delete the existing eligibility tree belonging to
-    a notification.
+    Delete the existing eligibility-rule tree for a
+    notification.
 
-    Rules are deleted first.
-
-    Groups are then deleted from deepest/child groups
-    toward root groups so the self-referencing
-    parent_group_id foreign key is never violated.
-
-    The caller owns the transaction.
+    Rules are deleted before groups because rules reference
+    their groups.
     """
 
-    groups = session.scalars(
-        select(EligibilityRuleGroup).where(
+    group_ids = session.scalars(
+        select(EligibilityRuleGroup.group_id)
+        .where(
             EligibilityRuleGroup.notification_id
             == notification_id
         )
     ).all()
 
-    if not groups:
+    if not group_ids:
         return
-
-    group_ids = {
-        group.group_id
-        for group in groups
-    }
-
-    # ---------------------------------------------------------
-    # DELETE RULES FIRST
-    # ---------------------------------------------------------
 
     session.execute(
         delete(EligibilityRule).where(
-            EligibilityRule.group_id.in_(group_ids)
+            EligibilityRule.group_id.in_(
+                group_ids
+            )
         )
     )
 
-    session.flush()
-
-    # ---------------------------------------------------------
-    # BUILD CHILD-FIRST DELETE ORDER
-    # ---------------------------------------------------------
-
-    children_by_parent: dict[
-        int | None,
-        list[EligibilityRuleGroup],
-    ] = {}
-
-    for group in groups:
-        children_by_parent.setdefault(
-            group.parent_group_id,
-            [],
-        ).append(group)
-
-    ordered_groups: list[EligibilityRuleGroup] = []
-
-    def collect_children(
-        parent_group_id: int | None,
-    ) -> None:
-        for group in children_by_parent.get(
-            parent_group_id,
-            [],
-        ):
-            collect_children(group.group_id)
-            ordered_groups.append(group)
-
-    collect_children(None)
-
-    # ---------------------------------------------------------
-    # SAFETY CHECK
-    # ---------------------------------------------------------
-
-    if len(ordered_groups) != len(groups):
-        raise ValueError(
-            "Eligibility rule group tree is invalid: "
-            "unable to determine a complete hierarchy."
+    session.execute(
+        delete(EligibilityRuleGroup).where(
+            EligibilityRuleGroup.group_id.in_(
+                group_ids
+            )
         )
-
-    # ---------------------------------------------------------
-    # DELETE CHILD GROUPS BEFORE PARENTS
-    # ---------------------------------------------------------
-
-    for group in ordered_groups:
-        session.delete(group)
+    )
 
     session.flush()
 
@@ -152,29 +190,22 @@ def _replace_exam_dates(
     extraction_result: AggregatedExtractionResult,
 ) -> None:
     """
-    Replace the authoritative examination dates with
-    the dates from the approved extraction.
-
-    The caller owns the transaction.
+    Replace the notification's existing exam dates with
+    the approved extraction's exam dates.
     """
-
-    # ---------------------------------------------------------
-    # REMOVE EXISTING DATES
-    # ---------------------------------------------------------
 
     notification.exam_dates.clear()
 
     session.flush()
 
-    # ---------------------------------------------------------
-    # ADD APPROVED DATES
-    # ---------------------------------------------------------
-
-    for exam_date_data in (
-        extraction_result.extraction
+    exam_dates = (
+        extraction_result
+        .extraction
         .exam_information
         .exam_dates
-    ):
+    )
+
+    for exam_date_data in exam_dates:
         start_date = _parse_date(
             exam_date_data.start_date
         )
@@ -183,15 +214,16 @@ def _replace_exam_dates(
             exam_date_data.end_date
         )
 
-        if start_date is None or end_date is None:
+        if start_date is None:
             raise ValueError(
-                "Exam date range cannot contain null dates."
+                "Exam date range cannot contain "
+                "a null start date."
             )
 
-        if start_date > end_date:
+        if end_date is None:
             raise ValueError(
-                "Exam date range start_date cannot be "
-                "after end_date."
+                "Exam date range cannot contain "
+                "a null end date."
             )
 
         exam_date = ExamDate(
@@ -212,10 +244,8 @@ def _persist_eligibility_tree(
     extraction_result: AggregatedExtractionResult,
 ) -> None:
     """
-    Replace the authoritative eligibility tree with
-    the approved extraction's recursive tree.
-
-    The logical structure is preserved exactly.
+    Replace the notification's existing eligibility tree
+    with the recursively extracted tree.
     """
 
     _delete_existing_eligibility_tree(
@@ -223,10 +253,15 @@ def _persist_eligibility_tree(
         notification_id=notification_id,
     )
 
-    for group_number, group_data in enumerate(
-        extraction_result.extraction
+    rule_groups = (
+        extraction_result
+        .extraction
         .eligibility_rules
-        .rule_groups,
+        .rule_groups
+    )
+
+    for group_number, group_data in enumerate(
+        rule_groups,
         start=1,
     ):
         _create_rule_group_recursive(
@@ -247,56 +282,47 @@ def persist_approved_extraction(
 ) -> None:
     """
     Persist a validated extraction into the authoritative
-    database structures.
+    notification and eligibility tables.
 
-    IMPORTANT:
-
-    This function does NOT commit.
-
-    The caller owns the transaction.
+    This function assumes validation has already succeeded.
     """
 
-    notification = session.get(
-        OfficialNotification,
-        extraction_history.notification_id,
+    notification = _get_locked_notification(
+        session=session,
+        notification_id=(
+            extraction_history.notification_id
+        ),
     )
-
-    if notification is None:
-        raise ValueError(
-            "Official notification not found."
-        )
 
     exam_information = (
-        extraction_result.extraction.exam_information
+        extraction_result
+        .extraction
+        .exam_information
     )
-
-    # ---------------------------------------------------------
-    # UPDATE NOTIFICATION INFORMATION
-    # ---------------------------------------------------------
 
     notification.release_date = _parse_date(
         exam_information.release_date
     )
 
-    notification.application_start_date = _parse_date(
-        exam_information.application_start_date
+    notification.application_start_date = (
+        _parse_date(
+            exam_information.application_start_date
+        )
     )
 
-    notification.application_end_date = _parse_date(
-        exam_information.application_end_date
+    notification.application_end_date = (
+        _parse_date(
+            exam_information.application_end_date
+        )
     )
 
     notification.ai_summary = (
         extraction_history.ai_summary
     )
 
-    notification.approval_status = APPROVED_STATUS
+    notification.approval_status = "APPROVED"
 
     notification.rejection_reason = None
-
-    # ---------------------------------------------------------
-    # REPLACE EXAM DATES
-    # ---------------------------------------------------------
 
     _replace_exam_dates(
         session=session,
@@ -304,22 +330,16 @@ def persist_approved_extraction(
         extraction_result=extraction_result,
     )
 
-    # ---------------------------------------------------------
-    # REPLACE ELIGIBILITY TREE
-    # ---------------------------------------------------------
-
     _persist_eligibility_tree(
         session=session,
-        notification_id=notification.notification_id,
+        notification_id=(
+            notification.notification_id
+        ),
         extraction_result=extraction_result,
     )
 
-    # ---------------------------------------------------------
-    # MARK EXTRACTION APPROVED
-    # ---------------------------------------------------------
-
     extraction_history.extraction_status = (
-        APPROVED_STATUS
+        "APPROVED"
     )
 
     session.flush()
@@ -330,69 +350,80 @@ def approve_extraction_with_session(
     extraction_id: int,
 ) -> ExtractionHistory:
     """
-    Approve one pending extraction using the supplied
-    SQLAlchemy session.
+    Approve an extraction inside an existing transaction.
 
-    This function does NOT commit.
+    Order:
 
-    The caller owns the transaction.
+        1. Load and lock extraction.
+        2. Ensure extraction is PENDING.
+        3. Lock its notification.
+        4. Verify this extraction is latest.
+        5. Deserialize extraction.
+        6. Normalize extraction.
+        7. Validate normalized extraction.
+        8. Persist approved data.
+        9. Return without committing.
 
-    This design makes the operation both:
-    - transaction-safe in production
-    - directly testable
+    The caller owns the transaction commit/rollback.
     """
 
     # ---------------------------------------------------------
-    # LOAD EXTRACTION WITH ROW LOCK
+    # 1. Lock extraction
     # ---------------------------------------------------------
 
-    extraction_history = session.scalar(
-        select(ExtractionHistory)
-        .where(
-            ExtractionHistory.extraction_id
-            == extraction_id
-        )
-        .with_for_update()
+    extraction = _get_locked_extraction(
+        session=session,
+        extraction_id=extraction_id,
     )
 
-    if extraction_history is None:
-        raise ValueError(
-            "Extraction not found."
-        )
-
     # ---------------------------------------------------------
-    # VERIFY EXTRACTION STATUS
+    # 2. Only PENDING extractions may be approved
     # ---------------------------------------------------------
 
-    if (
-        extraction_history.extraction_status
-        != PENDING_STATUS
-    ):
+    if extraction.extraction_status != "PENDING":
         raise ValueError(
             "Only pending extractions can be approved."
         )
 
     # ---------------------------------------------------------
-    # VERIFY EXTRACTION CONTENT
+    # 3. Lock the parent notification
     # ---------------------------------------------------------
 
-    if not extraction_history.extracted_content:
+    _get_locked_notification(
+        session=session,
+        notification_id=extraction.notification_id,
+    )
+
+    # ---------------------------------------------------------
+    # 4. Verify this is still the latest extraction
+    # ---------------------------------------------------------
+
+    _ensure_latest_extraction(
+        session=session,
+        extraction=extraction,
+    )
+
+    # ---------------------------------------------------------
+    # 5. Extraction content must exist
+    # ---------------------------------------------------------
+
+    if not extraction.extracted_content:
         raise ValueError(
             "Extraction content is empty."
         )
 
     # ---------------------------------------------------------
-    # LOAD AND DESERIALIZE EXTRACTION
+    # 6. Deserialize
     # ---------------------------------------------------------
 
     extraction_result = (
         deserialize_aggregated_extraction(
-            extraction_history.extracted_content
+            extraction.extracted_content
         )
     )
 
     # ---------------------------------------------------------
-    # NORMALIZE
+    # 7. Normalize ONLY the CompleteExtractionData
     # ---------------------------------------------------------
 
     normalized_extraction = (
@@ -401,13 +432,15 @@ def approve_extraction_with_session(
         )
     )
 
+    # Preserve the evidence/provenance while replacing
+    # the extraction with its normalized representation.
     normalized_result = AggregatedExtractionResult(
         extraction=normalized_extraction,
         evidence=extraction_result.evidence,
     )
 
     # ---------------------------------------------------------
-    # VALIDATE
+    # 8. Validate normalized extraction
     # ---------------------------------------------------------
 
     validation_errors = (
@@ -421,98 +454,45 @@ def approve_extraction_with_session(
             "Extraction failed validation: "
             f"{validation_errors}"
         )
-    # ---------------------------------------------------------
-    # LOCK RELATED NOTIFICATION
-    # ---------------------------------------------------------
-
-    notification = session.scalar(
-        select(OfficialNotification)
-        .where(
-            OfficialNotification.notification_id
-            == extraction_history.notification_id
-        )
-        .with_for_update()
-    )
-
-    if notification is None:
-        raise ValueError(
-            "Official notification not found."
-        )
 
     # ---------------------------------------------------------
-    # PERSIST APPROVED DATA
+    # 9. Persist ONLY after all validation succeeds
     # ---------------------------------------------------------
 
     persist_approved_extraction(
         session=session,
-        extraction_history=extraction_history,
+        extraction_history=extraction,
         extraction_result=normalized_result,
     )
 
-    return extraction_history
+    return extraction
 
 
 def approve_extraction_transaction(
     extraction_id: int,
 ) -> ExtractionHistory:
     """
-    Production entry point for approving an extraction.
+    Public transaction boundary for approving an extraction.
 
-    Creates one database session and one transaction.
+    A successful approval commits all changes atomically.
 
-    On success:
-        COMMIT
-
-    On failure:
-        ROLLBACK
+    Any failure rolls back everything performed during
+    this approval transaction.
     """
 
     with SessionLocal() as session:
-
         try:
-            extraction_history = (
-                approve_extraction_with_session(
-                    session=session,
-                    extraction_id=extraction_id,
-                )
+            extraction = approve_extraction_with_session(
+                session=session,
+                extraction_id=extraction_id,
             )
 
             session.commit()
 
-            session.refresh(
-                extraction_history
-            )
+            session.refresh(extraction)
 
-            return extraction_history
+            return extraction
 
         except Exception:
             session.rollback()
             raise
-def _ensure_latest_extraction(
-    session,
-    extraction,
-):
-    session.flush()
-
-    latest_extraction_id = session.scalar(
-        select(ExtractionHistory.extraction_id)
-        .where(
-            ExtractionHistory.notification_id
-            == extraction.notification_id
-        )
-        .order_by(
-            ExtractionHistory.extraction_id.desc()
-        )
-        .limit(1)
-    )
-
-    if latest_extraction_id is None:
-        raise ValueError(
-            "No extraction history found for notification."
-        )
-
-    if latest_extraction_id != extraction.extraction_id:
-        raise ValueError(
-            "This extraction is no longer the latest "
-            "extraction for the notification."
-        )
