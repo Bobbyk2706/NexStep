@@ -1,7 +1,9 @@
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
-
+from app.services.approved_extraction_service import (
+    approve_extraction_transaction,
+)
 from app.database.session import SessionLocal
 from app.models.official_notification import OfficialNotification
 from app.models.extraction_history import ExtractionHistory
@@ -54,36 +56,9 @@ def create_pending_extraction(
 
 
 def approve_extraction(extraction_id):
-    db = SessionLocal()
-
-    extraction = db.get(
-        ExtractionHistory,
+    return approve_extraction_transaction(
         extraction_id
     )
-
-    if extraction is None:
-        db.close()
-        raise ValueError("Extraction not found.")
-
-    extraction.extraction_status = "APPROVED"
-
-    notification = db.get(
-        OfficialNotification,
-        extraction.notification_id
-    )
-
-    if notification is None:
-        db.close()
-        raise ValueError("Official notification not found.")
-
-    notification.approval_status = "APPROVED"
-
-    db.commit()
-    db.refresh(extraction)
-
-    db.close()
-
-    return extraction
 
 
 def reject_extraction(extraction_id, feedback):
