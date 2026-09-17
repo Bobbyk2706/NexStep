@@ -5,8 +5,13 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import pymupdf
 
-STORAGE_DIR = Path("storage/notifications")
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+STORAGE_DIR = BASE_DIR / "storage" / "notifications"
+STORAGE_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
 
 
 def fetch_website(url):
@@ -125,7 +130,8 @@ def download_pdf(url):
 
     return {
         "content": pdf_content,
-        "path": str(file_path)
+        "path": str(file_path),
+        "url":url
     }
 
 
