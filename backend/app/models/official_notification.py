@@ -46,6 +46,8 @@ class OfficialNotification(Base):
 
     pdf_path: Mapped[str]
 
+    document_url: Mapped[str | None]
+    document_hash: Mapped[str | None]
     ai_summary: Mapped[str | None]
 
     ai_change_summary: Mapped[str | None]
