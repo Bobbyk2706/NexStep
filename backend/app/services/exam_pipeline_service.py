@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from datetime import date
 
 import pymupdf
+from sqlalchemy.orm import Session
 
 from app.ai.aggregated_extraction_result import (
     AggregatedExtractionResult,
@@ -23,6 +26,7 @@ from app.ai.extraction_serialization import (
 from app.ai.source_verification import (
     verify_exam_source,
 )
+from app.database.session import SessionLocal
 from app.services.document_chunker import (
     chunk_document_pages,
 )
@@ -48,7 +52,7 @@ def process_exam(
     exam_id,
     exam_name,
     official_url,
-    known_source=None
+    known_source=None,
 ):
     # ========================================================
     # 1. SOURCE DISCOVERY
@@ -79,7 +83,7 @@ def process_exam(
 
     verification = verify_exam_source(
         exam_name,
-        pdf_sources
+        pdf_sources,
     )
 
     if not verification.relevant:
@@ -91,9 +95,10 @@ def process_exam(
         (
             source
             for source in pdf_sources
-            if source["url"] == verification.selected_url
+            if source["url"]
+            == verification.selected_url
         ),
-        None
+        None,
     )
 
     if selected_source is None:
@@ -112,7 +117,7 @@ def process_exam(
 
     document_url = selected_source.get(
         "document_url",
-        selected_source.get("url")
+        selected_source.get("url"),
     )
 
     document_hash = selected_source.get(
@@ -150,7 +155,7 @@ def process_exam(
     try:
         document = pymupdf.open(
             stream=pdf_content,
-            filetype="pdf"
+            filetype="pdf",
         )
 
         pages = [
@@ -184,7 +189,7 @@ def process_exam(
 
     chunks = chunk_document_pages(
         pages,
-        chunk_size=30000
+        chunk_size=30000,
     )
 
     if not chunks:
@@ -199,7 +204,6 @@ def process_exam(
     chunk_results = []
 
     for chunk in chunks:
-
         result = extract_chunk_information(
             chunk
         )
@@ -230,8 +234,8 @@ def process_exam(
             f"{error}"
         ) from error
 
-
     print("\n--- AGGREGATED EXTRACTION ---")
+
     print(
         aggregated_result.extraction.model_dump_json(
             indent=2
@@ -244,6 +248,7 @@ def process_exam(
         print(
             f"\nChunk: {evidence.chunk_number}"
         )
+
         print(
             f"Pages: {evidence.page_numbers}"
         )
@@ -261,7 +266,7 @@ def process_exam(
     normalized_result = (
         AggregatedExtractionResult(
             extraction=normalized_extraction,
-            evidence=aggregated_result.evidence
+            evidence=aggregated_result.evidence,
         )
     )
 
@@ -292,65 +297,95 @@ def process_exam(
     )
 
     # ========================================================
-    # 11. CREATE PENDING NOTIFICATION
+    # 11 + 12. ATOMIC DATABASE TRANSACTION
+    # ========================================================
+    #
+    # Notification and extraction history are created
+    # inside ONE transaction.
+    #
+    # If either operation fails:
+    #     notification -> rolled back
+    #     extraction   -> rolled back
+    #
+    # Nothing is persisted partially.
     # ========================================================
 
-    notification_id = off_not(
-        exam_id=exam_id,
-        title=(
-            exam_information.exam_name
-            or exam_name
-        ),
-        notification_type="EXAM_NOTIFICATION",
-        release_date=parse_date(
-            exam_information.release_date
-        ),
-        application_start_date=parse_date(
-            exam_information.application_start_date
-        ),
-        application_end_date=parse_date(
-            exam_information.application_end_date
-        ),
-        exam_dates=[
-            {
-                "start_date": parse_date(
-                    exam_date.start_date
+    with SessionLocal() as db:
+        try:
+            # ------------------------------------------------
+            # Create pending notification
+            # ------------------------------------------------
+
+            notification_id = off_not(
+                exam_id=exam_id,
+                title=(
+                    exam_information.exam_name
+                    or exam_name
                 ),
-                "end_date": parse_date(
-                    exam_date.end_date
-                )
-            }
-            for exam_date
-            in exam_information.exam_dates
-        ],
-        official_url=official_url,
-        document_url=document_url,
-        pdf_path=pdf_path,
-        document_hash=document_hash,
-        ai_summary=None,
-        ai_change_summary=None,
-        approval_status="PENDING",
-        rejection_reason=None,
-    )
-
-    # ========================================================
-    # 12. CREATE EXTRACTION HISTORY
-    # ========================================================
-
-    extraction_id = create_extraction_history(
-        notification_id=notification_id,
-        extraction_type="COMPLETE_EXTRACTION",
-        source_pdf_path=pdf_path,
-        extracted_content=(
-            serialize_aggregated_extraction(
-                normalized_result
+                notification_type="EXAM_NOTIFICATION",
+                release_date=parse_date(
+                    exam_information.release_date
+                ),
+                application_start_date=parse_date(
+                    exam_information.application_start_date
+                ),
+                application_end_date=parse_date(
+                    exam_information.application_end_date
+                ),
+                exam_dates=[
+                    {
+                        "start_date": parse_date(
+                            exam_date.start_date
+                        ),
+                        "end_date": parse_date(
+                            exam_date.end_date
+                        ),
+                    }
+                    for exam_date
+                    in exam_information.exam_dates
+                ],
+                official_url=official_url,
+                document_url=document_url,
+                pdf_path=pdf_path,
+                document_hash=document_hash,
+                ai_summary=None,
+                ai_change_summary=None,
+                approval_status="PENDING",
+                rejection_reason=None,
+                db=db,
             )
-        ),
-        ai_summary=None,
-        change_detected=False,
-        change_details=None,
-        extraction_status="PENDING"
-    )
+
+            # ------------------------------------------------
+            # Create extraction history
+            # ------------------------------------------------
+
+            extraction_id = (
+                create_extraction_history(
+                    notification_id=notification_id,
+                    extraction_type="COMPLETE_EXTRACTION",
+                    source_pdf_path=pdf_path,
+                    extracted_content=(
+                        serialize_aggregated_extraction(
+                            normalized_result
+                        )
+                    ),
+                    ai_summary=None,
+                    change_detected=False,
+                    change_details=None,
+                    extraction_status="PENDING",
+                    db=db,
+                )
+            )
+
+            # ------------------------------------------------
+            # Commit BOTH records together
+            # ------------------------------------------------
+
+            db.commit()
+
+        except Exception:
+            db.rollback()
+            raise
 
     # ========================================================
     # 13. RETURN
@@ -364,5 +399,5 @@ def process_exam(
         "document_hash": document_hash,
         "selected_source": selected_source["url"],
         "source_type": verification.source_type,
-        "status": "PENDING"
+        "status": "PENDING",
     }

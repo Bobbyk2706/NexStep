@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.models.student import Student
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
