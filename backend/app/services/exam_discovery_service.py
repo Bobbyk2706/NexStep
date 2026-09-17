@@ -1,4 +1,5 @@
 import os
+import hashlib
 import requests
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -121,7 +122,9 @@ def download_pdf(url):
         )
 
     pdf_content = response.content
-
+    document_hash = hashlib.sha256(
+    pdf_content
+    ).hexdigest()
     filename = get_pdf_filename(url)
     file_path = STORAGE_DIR / filename
 
@@ -131,7 +134,8 @@ def download_pdf(url):
     return {
         "content": pdf_content,
         "path": str(file_path),
-        "url":url
+        "url":url,
+        "document_hash": document_hash
     }
 
 
