@@ -188,10 +188,12 @@ def discover_exam_sources(official_url):
     )
 
     return {
-        "url": official_url,
-        "content_type": content_type,
-        "text": response.text,
-        "links": links
+    "url": official_url,
+    "content_type": content_type,
+    "text": text,
+    "pdf_path": pdf["path"],
+    "document_url": pdf["url"],
+    "document_hash": pdf["document_hash"],
     }
 
 
@@ -245,11 +247,14 @@ def crawl_exam_sources(official_url):
                 )
 
                 discovered_sources.append({
-                    "url": current_url,
-                    "content_type": content_type,
-                    "text": text,
-                    "pdf_path": pdf["path"]
-                })
+                            "url": current_url,
+                            "content_type": content_type,
+                            "text": text,
+                            "content":pdf['content'],
+                            "pdf_path": pdf["path"],
+                            "document_url": pdf["url"],
+                            "document_hash": pdf["document_hash"],
+                            })
 
             except Exception as e:
                 print(

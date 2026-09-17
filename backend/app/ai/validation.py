@@ -1,6 +1,6 @@
 from datetime import date
 
-from app.ai.schemas import ExamInformation
+from app.ai.exam_schemas import ExamInformation
 
 
 def validate_exam_information(

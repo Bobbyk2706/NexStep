@@ -18,11 +18,13 @@ def off_not(
     application_end_date,
     exam_dates,
     official_url,
+    document_url,
     pdf_path,
+    document_hash,
     ai_summary,
     ai_change_summary,
     approval_status,
-    rejection_reason
+    rejection_reason,
 ):
     with SessionLocal() as s:
 
@@ -38,18 +40,20 @@ def off_not(
             )
 
         official_notification = OfficialNotification(
-            title=title,
-            notification_type=notification_type,
-            release_date=release_date,
-            application_start_date=application_start_date,
-            application_end_date=application_end_date,
-            official_url=official_url,
-            pdf_path=pdf_path,
-            ai_summary=ai_summary,
-            ai_change_summary=ai_change_summary,
-            approval_status=approval_status,
-            rejection_reason=rejection_reason
-        )
+                title=title,
+                notification_type=notification_type,
+                release_date=release_date,
+                application_start_date=application_start_date,
+                application_end_date=application_end_date,
+                official_url=official_url,
+                document_url=document_url,
+                pdf_path=pdf_path,
+                document_hash=document_hash,
+                ai_summary=ai_summary,
+                ai_change_summary=ai_change_summary,
+                approval_status=approval_status,
+                rejection_reason=rejection_reason,
+                )
 
         for exam_date in exam_dates:
             date_record = ExamDate(
