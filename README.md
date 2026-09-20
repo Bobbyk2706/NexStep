@@ -66,11 +66,11 @@ It combines **AI, automation, and rule-based eligibility evaluation** to provide
 - ER Diagram
 - Database Design
 - Initial PostgreSQL Tables & Relationships
+- Authentication
 
 ### Next
 
 - Backend Development
-- Authentication
 - Eligibility Engine
 - Frontend Development
 - Automation
