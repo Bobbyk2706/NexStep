@@ -121,10 +121,7 @@ def is_pdf(
     Determine whether a resource is likely a PDF based on
     HTTP Content-Type or URL.
 
-    This function is used during source discovery.
-
-    Actual downloaded PDF content is validated separately
-    using the PDF file signature.
+    Actual downloaded content is validated separately.
     """
 
     if (
@@ -178,18 +175,21 @@ def get_pdf_filename(url):
     return filename
 
 
-def download_pdf(url):
+def download_pdf(
+    url,
+    save_to_storage=True,
+):
     """
     Download and validate a PDF.
 
-    The response is accepted only when the actual content
-    begins with the PDF signature.
+    The downloaded bytes are always returned.
 
-    A generic Content-Type such as application/octet-stream
-    is allowed when the downloaded bytes are actually a PDF.
+    When save_to_storage=True, the PDF is also persisted
+    under the notification storage directory.
 
-    The returned document_hash is the SHA-256 hash of the
-    exact downloaded bytes.
+    Monitoring can use save_to_storage=False so that a newly
+    detected document cannot overwrite the currently approved
+    document before HITL approval.
     """
 
     response = requests.get(
@@ -222,30 +222,37 @@ def download_pdf(url):
         pdf_content
     ).hexdigest()
 
-    filename = get_pdf_filename(
-        url
-    )
-
-    file_path = (
-        STORAGE_DIR
-        / filename
-    )
-
-    with open(
-        file_path,
-        "wb",
-    ) as file:
-        file.write(
-            pdf_content
-        )
-
-    return {
+    result = {
         "content": pdf_content,
-        "path": str(file_path),
         "url": url,
         "document_hash": document_hash,
         "content_type": content_type,
     }
+
+    if save_to_storage:
+
+        filename = get_pdf_filename(
+            url
+        )
+
+        file_path = (
+            STORAGE_DIR
+            / filename
+        )
+
+        with open(
+            file_path,
+            "wb",
+        ) as file:
+            file.write(
+                pdf_content
+            )
+
+        result["path"] = str(
+            file_path
+        )
+
+    return result
 
 
 # ============================================================
@@ -332,9 +339,6 @@ def discover_exam_sources(
         official_url,
     )
 
-    # The previous implementation referenced `text` and
-    # `pdf` here even though they only existed in the PDF
-    # branch. Return the discovered links instead.
     return links
 
 
