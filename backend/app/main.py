@@ -3,9 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.routers.admin_review import router as admin_review_router
 from app.routers.auth_router import router as auth_router
+from app.routers.tracked_exam_router import (
+    router as tracked_exam_router,
+)
 from app.routers.eligibility_router import router as eligibility_router
 from app.routers.profile_router import router as profile_router
-
+from app.routers.exam_router import router as exam_router
 app = FastAPI(title="NexStep API")
 
 
@@ -31,7 +34,8 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(eligibility_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(admin_review_router)
-
+app.include_router(tracked_exam_router, prefix="/api")
+app.include_router(exam_router, prefix="/api")
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc: HTTPException):
     """FastAPI's default error body is {"detail": ...}. The frontend's

@@ -21,6 +21,7 @@ from app.ai.complete_extraction_validation import (
 )
 from app.ai.extraction_serialization import (
     deserialize_aggregated_extraction,
+    serialize_aggregated_extraction,
 )
 from app.ai.semantic_change_schemas import (
     SemanticChangeAnalysis,
@@ -66,7 +67,26 @@ def _serialize(value: Any) -> str:
         ensure_ascii=False,
         default=str,
     )
+def _serialize_extraction(
+    value: Any,
+) -> str:
+    """
+    Serialize an AggregatedExtractionResult using the
+    canonical NexStep extraction serialization format.
 
+    Generic JSON serialization is retained for other
+    values used by monitoring review records.
+    """
+
+    if isinstance(
+        value,
+        AggregatedExtractionResult,
+    ):
+        return serialize_aggregated_extraction(
+            value
+        )
+
+    return _serialize(value)
 
 def _deserialize_monitoring_extraction(
     value: str,
@@ -156,6 +176,7 @@ def create_monitoring_review(
                 OfficialNotification.notification_id
                 == notification_id
             )
+            .with_for_update()
         )
 
         if notification is None:
@@ -180,6 +201,16 @@ def create_monitoring_review(
             raise MonitoringReviewError(
                 "A monitoring review cannot be created "
                 "for an unchanged document."
+            )
+
+        if (
+            notification.document_hash
+            != old_document_hash
+        ):
+            raise MonitoringReviewError(
+                "Monitoring review is stale. The approved "
+                "notification no longer matches the document "
+                "from which this review was created."
             )
 
         if not structural_report.change_detected:
@@ -229,7 +260,6 @@ def create_monitoring_review(
     finally:
         if owns_session:
             db.close()
-
 
 def approve_monitoring_review(
     *,

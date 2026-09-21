@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
-
+from sqlalchemy import desc
+from sqlalchemy.orm import selectinload
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -108,6 +109,43 @@ def off_not(
         if owns_session:
             db.rollback()
         raise
+
+    finally:
+        if owns_session:
+            db.close()
+def get_latest_approved_notification(
+    exam_id: int,
+    db: Session | None = None,
+):
+    """
+    Returns the latest approved official notification for an exam.
+
+    Ordering uses release_date first and notification_id as a
+    deterministic tie-breaker.
+    """
+    owns_session = db is None
+
+    if owns_session:
+        db = SessionLocal()
+
+    try:
+        statement = (
+            select(OfficialNotification)
+            .options(
+                selectinload(OfficialNotification.exam_dates),
+            )
+            .where(
+                OfficialNotification.exam_id == exam_id,
+                OfficialNotification.approval_status == "APPROVED",
+            )
+            .order_by(
+                desc(OfficialNotification.release_date),
+                desc(OfficialNotification.notification_id),
+            )
+            .limit(1)
+        )
+
+        return db.scalar(statement)
 
     finally:
         if owns_session:
