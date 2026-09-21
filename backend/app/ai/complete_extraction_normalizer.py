@@ -25,6 +25,7 @@ def normalize_date(value: str | None) -> str | None:
         "%d %B %Y",
         "%B %d, %Y",
         "%B %d %Y",
+        "%d.%m.%Y"
     ]
 
     for date_format in formats:

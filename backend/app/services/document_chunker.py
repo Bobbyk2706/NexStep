@@ -80,3 +80,28 @@ def chunk_document_pages(
         )
 
     return chunks
+def chunk_text(
+    text: str,
+    chunk_size: int = 30000,
+) -> list[str]:
+    """
+    Losslessly split plain document text into fixed-size chunks.
+
+    This is a compatibility helper for callers that only have
+    complete document text and do not need page provenance.
+
+    No characters are filtered, normalized, or discarded.
+    """
+
+    if chunk_size <= 0:
+        raise ValueError(
+            "chunk_size must be greater than zero."
+        )
+
+    if not text:
+        return []
+
+    return [
+        text[start:start + chunk_size]
+        for start in range(0, len(text), chunk_size)
+    ]
