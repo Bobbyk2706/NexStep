@@ -4,8 +4,13 @@ import os
 import time
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import errors
+from groq import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    Groq,
+    RateLimitError,
+)
 from pydantic import ValidationError
 
 from app.ai.chunk_extraction_result import ChunkExtractionResult
@@ -15,16 +20,72 @@ from app.services.document_chunker import DocumentChunk
 
 
 # ============================================================
-# GEMINI CLIENT
+# GROQ CLIENT
 # ============================================================
 
 load_dotenv()
 
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError(
+        "GROQ_API_KEY is not configured."
+    )
+
+client = Groq(api_key=GROQ_API_KEY)
+
+MODEL_NAME = "openai/gpt-oss-120b"
 
 
+# ============================================================
+# GROQ JSON SCHEMA COMPATIBILITY
+# ============================================================
+
+def _make_groq_compatible_schema(schema: dict) -> dict:
+    """
+    Convert a Pydantic JSON schema into a schema accepted
+    by Groq structured outputs.
+
+    Groq strict structured outputs require:
+
+    - additionalProperties=false on every object
+    - required must contain every property name
+
+    This modifies only the schema sent to Groq.
+    It does not modify the application's Pydantic models.
+    """
+
+    if isinstance(schema, dict):
+
+        # ----------------------------------------------------
+        # OBJECT SCHEMAS
+        # ----------------------------------------------------
+
+        if schema.get("type") == "object":
+
+            schema["additionalProperties"] = False
+
+            properties = schema.get("properties")
+
+            if isinstance(properties, dict):
+                schema["required"] = list(properties.keys())
+
+        # ----------------------------------------------------
+        # RECURSIVELY PROCESS ALL NESTED SCHEMA VALUES
+        # ----------------------------------------------------
+
+        for value in schema.values():
+
+            if isinstance(value, dict):
+                _make_groq_compatible_schema(value)
+
+            elif isinstance(value, list):
+
+                for item in value:
+                    if isinstance(item, dict):
+                        _make_groq_compatible_schema(item)
+
+    return schema
 # ============================================================
 # EXTRACTION FUNCTION
 # ============================================================
@@ -108,7 +169,45 @@ Do not use outside knowledge.
 Do not assume missing information.
 
 {feedback_section}
+==================================================
+OUTPUT STRUCTURE
+==================================================
 
+The response represents a CompleteExtractionData object.
+
+The response MUST contain exactly two top-level fields:
+
+1. exam_information
+2. eligibility_rules
+
+The structure is:
+
+exam_information:
+    exam_name
+    conducting_body
+    release_date
+    application_start_date
+    application_end_date
+    exam_dates
+    eligibility:
+        minimum_age
+        maximum_age
+        educational_qualification
+        nationality
+        work_experience
+        other_requirements
+
+eligibility_rules:
+    rule_groups
+
+IMPORTANT:
+
+- "eligibility" belongs INSIDE "exam_information".
+- Do NOT create a separate top-level "eligibility" field.
+- "eligibility_rules" is a separate top-level field.
+- Every required field must be present.
+- Use null for unavailable scalar values.
+- Use [] for unavailable list values.
 ==================================================
 CHUNK EXTRACTION RULES
 ==================================================
@@ -274,23 +373,45 @@ incomplete.
 Retry the extraction for the SAME document chunk.
 
 Return ONLY valid JSON matching the supplied response schema.
+==================================================
+REQUIRED OUTPUT STRUCTURE
+==================================================
 
-STRICT REQUIREMENTS:
+The response MUST have exactly two top-level fields:
 
-- Extract only explicitly supported information.
-- Do not use outside knowledge.
-- Do not invent missing values.
-- Do not copy source text.
-- Do not summarize the document.
-- Do not repeat rules.
-- Keep strings concise.
-- Preserve explicit AND / OR relationships.
-- Return null or empty lists when information is absent.
-- The JSON response MUST be fully closed and syntactically valid.
+1. exam_information
+2. eligibility_rules
 
-If there is too much information to include, prioritize
-distinct structured facts and eligibility rules rather than
-copying explanatory text.
+The eligibility object MUST be nested inside
+exam_information.
+
+Correct structure:
+
+exam_information:
+    exam_name
+    conducting_body
+    release_date
+    application_start_date
+    application_end_date
+    exam_dates
+    eligibility:
+        minimum_age
+        maximum_age
+        educational_qualification
+        nationality
+        work_experience
+        other_requirements
+
+eligibility_rules:
+    rule_groups
+
+Incorrect structure:
+
+exam_information
+eligibility
+eligibility_rules
+
+Do NOT create eligibility as a top-level field.
 
 ==================================================
 DOCUMENT CHUNK
@@ -300,7 +421,15 @@ DOCUMENT CHUNK
 """
 
     # ========================================================
-    # GEMINI REQUEST
+    # GROQ JSON SCHEMA
+    # ========================================================
+
+    response_schema = _make_groq_compatible_schema(
+        CompleteExtractionData.model_json_schema()
+    )
+
+    # ========================================================
+    # GROQ REQUEST
     # ========================================================
 
     max_attempts = 3
@@ -316,34 +445,52 @@ DOCUMENT CHUNK
         )
 
         try:
-
-            response = client.models.generate_content(
-                model="gemini-3.5-flash",
-                contents=current_prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": CompleteExtractionData,
-                    "temperature": 0.0,
-                    "max_output_tokens": 16384,
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You extract structured information "
+                            "from official examination documents. "
+                            "Use only information explicitly "
+                            "supported by the supplied document "
+                            "chunk. Never invent information."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": current_prompt,
+                    },
+                ],
+                temperature=0,
+                max_tokens=4096,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "complete_extraction",
+                        "strict": True,
+                        "schema": response_schema,
+                    },
                 },
             )
 
         # ----------------------------------------------------
-        # TEMPORARY GEMINI SERVER FAILURE
+        # GROQ RATE LIMIT
         # ----------------------------------------------------
 
-        except errors.ServerError as error:
+        except RateLimitError as error:
 
             if attempt == max_attempts - 1:
                 raise RuntimeError(
-                    "Gemini service remained unavailable "
-                    "after multiple attempts."
+                    "Groq rate limit was reached after "
+                    "multiple attempts."
                 ) from error
 
-            wait_seconds = 2 ** attempt
+            wait_seconds = 5 * (attempt + 1)
 
             print(
-                "Gemini temporarily unavailable. "
+                "Groq rate limit reached. "
                 f"Retrying in {wait_seconds} seconds..."
             )
 
@@ -352,41 +499,91 @@ DOCUMENT CHUNK
             continue
 
         # ----------------------------------------------------
-        # GEMINI CLIENT / QUOTA FAILURE
+        # GROQ API STATUS FAILURE
         # ----------------------------------------------------
 
-        except errors.ClientError as error:
+        except APIStatusError as error:
 
-            error_text = str(error)
+            error_text = str(error).lower()
 
             if (
-                "RESOURCE_EXHAUSTED" in error_text
-                or "quota" in error_text.lower()
+                getattr(error, "status_code", None) == 413
+                or "tokens per minute" in error_text
+                or "request too large" in error_text
             ):
                 raise RuntimeError(
-                    "Gemini API quota has been exhausted. "
-                    "No further extraction requests will be made."
+                    "Groq rejected this document chunk because "
+                    "the request is too large for the model's "
+                    "current token-per-minute limit. "
+                    "Reduce the document chunk size and retry."
                 ) from error
 
             raise RuntimeError(
-                f"Gemini API client error: {error}"
+                f"Groq API error: {error}"
             ) from error
+
+        # ----------------------------------------------------
+        # GROQ CONNECTION FAILURE
+        # ----------------------------------------------------
+
+        except APIConnectionError as error:
+
+            if attempt == max_attempts - 1:
+                raise RuntimeError(
+                    "Groq service could not be reached "
+                    "after multiple attempts."
+                ) from error
+
+            wait_seconds = 2 ** attempt
+
+            print(
+                "Groq connection failed. "
+                f"Retrying in {wait_seconds} seconds..."
+            )
+
+            time.sleep(wait_seconds)
+
+            continue
+
+        # ----------------------------------------------------
+        # GROQ TIMEOUT
+        # ----------------------------------------------------
+
+        except APITimeoutError as error:
+
+            if attempt == max_attempts - 1:
+                raise RuntimeError(
+                    "Groq request timed out after "
+                    "multiple attempts."
+                ) from error
+
+            wait_seconds = 2 ** attempt
+
+            print(
+                "Groq request timed out. "
+                f"Retrying in {wait_seconds} seconds..."
+            )
+
+            time.sleep(wait_seconds)
+
+            continue
 
         # ----------------------------------------------------
         # EMPTY RESPONSE
         # ----------------------------------------------------
 
-        response_text = response.text
+        response_text = response.choices[0].message.content
 
         if not response_text:
+
             if attempt == max_attempts - 1:
                 raise RuntimeError(
-                    "Gemini returned an empty extraction response "
+                    "Groq returned an empty extraction response "
                     "after multiple attempts."
                 )
 
             print(
-                "Gemini returned an empty response. "
+                "Groq returned an empty response. "
                 "Retrying with stricter extraction constraints..."
             )
 
@@ -410,13 +607,13 @@ DOCUMENT CHUNK
 
             if attempt == max_attempts - 1:
                 raise RuntimeError(
-                    "Gemini returned invalid or truncated "
+                    "Groq returned invalid or truncated "
                     "structured extraction JSON after "
                     "multiple attempts."
                 ) from error
 
             print(
-                "Gemini returned invalid or incomplete JSON. "
+                "Groq returned invalid or incomplete JSON. "
                 "Retrying with stricter output constraints..."
             )
 

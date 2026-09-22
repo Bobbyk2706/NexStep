@@ -1,20 +1,36 @@
+from __future__ import annotations
+
+import json
 import os
 
 from dotenv import load_dotenv
-from google import genai
+from groq import Groq
+from pydantic import ValidationError
 
 from app.ai.eligibility_schemas import EligibilityRulesData
 
 
 load_dotenv()
 
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError(
+        "GROQ_API_KEY is not configured."
+    )
+
+
+client = Groq(
+    api_key=GROQ_API_KEY,
 )
 
 
+MODEL_NAME = "openai/gpt-oss-120b"
+
+
 def extract_eligibility_rules(
-    text: str
+    text: str,
 ) -> EligibilityRulesData:
 
     prompt = f"""
@@ -25,12 +41,13 @@ Return the requirements as a structured logical rule tree.
 
 Rules:
 
-1. Extract only eligibility requirements that are explicitly
-   supported by the document.
+1. Extract only eligibility requirements explicitly supported
+   by the document.
 
 2. Do not invent or assume requirements.
 
 3. Use these attribute names when applicable:
+
    CGPA
    Percentage
    Specialization
@@ -41,6 +58,7 @@ Rules:
    Work Experience
 
 4. Use only these operators:
+
    =
    !=
    >
@@ -50,56 +68,21 @@ Rules:
 
 5. Do NOT use the IN operator.
 
-6. If the document says that an attribute can have multiple
-   acceptable values, represent those alternatives using an
-   OR child group.
+6. If an attribute can have multiple acceptable values,
+   represent those alternatives using an OR child group.
 
-   Example:
+7. If multiple requirements must all be satisfied,
+   use an AND group.
 
-   Nationality can be India, Nepal, or Bhutan
-
-   becomes:
-
-   OR
-   ├── Nationality = India
-   ├── Nationality = Nepal
-   └── Nationality = Bhutan
-
-7. If multiple requirements must all be satisfied, use an
-   AND group.
-
-   Example:
-
-   Education = Graduate
-   AND
-   CGPA >= 7.0
-
-8. Use child_groups whenever nested logical conditions are
-   required.
-
-   Example:
-
-   Education = Graduate
-   AND
-   (
-       Nationality = India
-       OR
-       Nationality = Nepal
-   )
-
-   should be represented as:
-
-   Root group: AND
-       Rule: Education = Graduate
-       Child group: OR
-           Rule: Nationality = India
-           Rule: Nationality = Nepal
+8. Use child_groups whenever nested logical conditions
+   are required.
 
 9. Preserve the logical meaning of the official document.
 
 10. Extract every explicitly stated eligibility requirement.
 
 11. Do not include:
+
     - application instructions
     - exam dates
     - syllabus
@@ -107,20 +90,49 @@ Rules:
     - document submission instructions
     - unrelated information
 
-Official examination document:
+OFFICIAL EXAMINATION DOCUMENT:
 
 {text}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": EligibilityRulesData,
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict eligibility-rule extraction "
+                    "system. Extract only requirements explicitly "
+                    "supported by the supplied official document."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "eligibility_rules",
+                "strict": False,
+                "schema": EligibilityRulesData.model_json_schema(),
+            },
         },
     )
 
-    return EligibilityRulesData.model_validate_json(
-        response.text
-    )
+    content = response.choices[0].message.content
+
+    if not content:
+        raise RuntimeError(
+            "Groq returned an empty response."
+        )
+
+    try:
+        return EligibilityRulesData.model_validate(
+            json.loads(content)
+        )
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise RuntimeError(
+            "Groq returned eligibility rules that failed validation."
+        ) from exc

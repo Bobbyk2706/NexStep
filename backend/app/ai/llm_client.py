@@ -1,20 +1,37 @@
+from __future__ import annotations
+
+import json
 import os
 
 from dotenv import load_dotenv
-from google import genai
+from groq import Groq
+from pydantic import ValidationError
 
 from app.ai.exam_schemas import ExamInformation
 
+
 load_dotenv()
 
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError(
+        "GROQ_API_KEY is not configured."
+    )
+
+
+client = Groq(
+    api_key=GROQ_API_KEY,
 )
+
+
+MODEL_NAME = "openai/gpt-oss-120b"
 
 
 def extract_exam_information(
     text: str,
-    feedback: str | None = None
+    feedback: str | None = None,
 ) -> ExamInformation:
 
     feedback_instruction = ""
@@ -35,6 +52,7 @@ Extract exam information from the following official
 exam document.
 
 Rules:
+
 - Extract only information explicitly present in the document.
 - Do not invent or assume missing information.
 - If a field is not available, return null.
@@ -58,15 +76,44 @@ ORIGINAL OFFICIAL DOCUMENT:
 {text}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": ExamInformation,
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict information extraction system. "
+                    "Extract only information explicitly supported "
+                    "by the supplied official document."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "exam_information",
+                "strict": False,
+                "schema": ExamInformation.model_json_schema(),
+            },
         },
     )
 
-    return ExamInformation.model_validate_json(
-        response.text
-    )
+    content = response.choices[0].message.content
+
+    if not content:
+        raise RuntimeError(
+            "Groq returned an empty response."
+        )
+
+    try:
+        return ExamInformation.model_validate(
+            json.loads(content)
+        )
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise RuntimeError(
+            "Groq returned exam data that failed validation."
+        ) from exc

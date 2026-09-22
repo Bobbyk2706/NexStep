@@ -17,7 +17,7 @@ class DocumentChunk:
 
 def chunk_document_pages(
     pages: list[str],
-    chunk_size: int = 30000,
+    chunk_size: int = 16000,
 ) -> list[DocumentChunk]:
     """
     Create lossless chunks from page text while preserving
@@ -82,7 +82,7 @@ def chunk_document_pages(
     return chunks
 def chunk_text(
     text: str,
-    chunk_size: int = 30000,
+    chunk_size: int = 16000,
 ) -> list[str]:
     """
     Losslessly split plain document text into fixed-size chunks.
