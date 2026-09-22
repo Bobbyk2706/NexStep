@@ -30,11 +30,7 @@ export default function UpcomingExams() {
         <Card>
           <p className="text-sm text-slate-500">
             Nothing eligible on your timeline right now. Check{" "}
-<<<<<<< HEAD
             <Link to="/eligibility" className="font-medium text-gold hover:underline">eligibility results</Link> as your profile updates.
-=======
-            <Link to="/eligibility" className="font-medium text-indigo-700 hover:underline">eligibility results</Link> as your profile updates.
->>>>>>> origin/main
           </p>
         </Card>
       )}
@@ -52,11 +48,7 @@ export default function UpcomingExams() {
                 </div>
                 <EligibilityPill eligible={item.exam.eligible} deadline={item.exam.applicationDeadline} size="sm" />
               </div>
-<<<<<<< HEAD
               <Link to={`/exams/${item.exam.id}`} className="mt-3 block font-display font-semibold text-ink hover:text-gold">
-=======
-              <Link to={`/exams/${item.exam.id}`} className="mt-3 block font-display font-semibold text-ink hover:text-indigo-700">
->>>>>>> origin/main
                 {item.exam.name}
               </Link>
               <p className="text-sm text-slate-500">{item.exam.organization}</p>
