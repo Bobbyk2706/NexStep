@@ -7,7 +7,11 @@ import { timeAgo } from "../utils/date";
 
 const TYPE_META = {
   deadline: { icon: CalendarClock, color: "text-amber-600 bg-amber-50" },
+<<<<<<< HEAD
   exam: { icon: BellRing, color: "text-gold bg-indigo-50" },
+=======
+  exam: { icon: BellRing, color: "text-indigo-700 bg-indigo-50" },
+>>>>>>> origin/main
   "new-eligible": { icon: Sparkles, color: "text-signal-600 bg-signal-50" },
   update: { icon: Info, color: "text-slate-500 bg-slate-50" },
 };
@@ -54,7 +58,11 @@ export default function Notifications() {
                 <p className="mt-1 text-sm text-slate-500">{n.message}</p>
                 <div className="mt-2.5 flex items-center gap-4">
                   {n.examId && (
+<<<<<<< HEAD
                     <Link to={`/exams/${n.examId}`} className="text-sm font-medium text-gold hover:underline">
+=======
+                    <Link to={`/exams/${n.examId}`} className="text-sm font-medium text-indigo-700 hover:underline">
+>>>>>>> origin/main
                       View exam
                     </Link>
                   )}

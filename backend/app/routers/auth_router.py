@@ -28,7 +28,11 @@ from app.schemas.auth import (
     TokenPair,
     StudentOut,
     AdminOut,
+    SimpleSignupRequest,
+    AuthResponse,
+    UserSummary,
 )
+from app.routers.profile_router import student_has_profile
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -64,6 +68,63 @@ def student_signup(payload: StudentSignupRequest, db: Session = Depends(get_db))
 # NOTE: no admin self-signup route — admin accounts are provisioned
 # directly (e.g. by another admin or a DB seed script), not via a public
 # endpoint. Say the word if NexStep needs an admin-invite flow instead.
+
+
+# ------------------------------------------------ unified (frontend) ---
+
+@router.post(
+    "/signup",
+    response_model=AuthResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def unified_signup(payload: SimpleSignupRequest, db: Session = Depends(get_db)):
+    """Matches the frontend's exact contract: name/email/password only,
+    returns a single token (no refresh token — the frontend doesn't
+    implement refresh handling) plus hasProfile. Student-only; wraps the
+    same Student row /auth/student/signup uses, just with the extra
+    fields (DOB/nationality/state/gender) left unset until the profile
+    step fills them in via PUT /student/profile."""
+    existing = db.query(Student).filter(Student.email == payload.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    student = Student(
+        name=payload.name,
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        account_status="active",
+        token_version=new_token_version(),
+    )
+    db.add(student)
+    db.commit()
+    db.refresh(student)
+
+    access = create_access_token(student.student_id, "student")
+    return AuthResponse(
+        token=access,
+        user=UserSummary(name=student.name, email=student.email),
+        hasProfile=False,
+    )
+
+
+@router.post("/login", response_model=AuthResponse)
+def unified_login(payload: LoginRequest, db: Session = Depends(get_db)):
+    student = db.query(Student).filter(Student.email == payload.email).first()
+    if not student or not verify_password(payload.password, student.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    if is_account_blocked(student.account_status):
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    if not student.token_version:
+        student.token_version = new_token_version()
+        db.commit()
+
+    access = create_access_token(student.student_id, "student")
+    return AuthResponse(
+        token=access,
+        user=UserSummary(name=student.name, email=student.email),
+        hasProfile=student_has_profile(db, student.student_id),
+    )
 
 
 # ----------------------------------------------------------------- login ---

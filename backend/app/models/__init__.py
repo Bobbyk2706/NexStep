@@ -1,5 +1,6 @@
 from app.models.student import Student
 from app.models.education import Education
+from app.models.work_experience import WorkExperience
 from app.models.conducting_body import ConductingBody
 from app.models.exam import Exam
 from app.models.studentexameligibility import StudentExamEligibility

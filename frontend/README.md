@@ -1,9 +1,13 @@
 # NexStep — Frontend
 
 A React (Vite + Tailwind) frontend for NexStep: students fill in their profile once, and NexStep
+<<<<<<< HEAD
 automatically shows which exams they're eligible for — no picking an exam first. Visual identity
 is a restrained academic-luxury system (warm ink/ivory/antique-gold, serif+sans+mono type) shared
 across the student app, admin console, and the assistant feature.
+=======
+automatically shows which exams they're eligible for — no picking an exam first.
+>>>>>>> origin/main
 
 ## Run it
 
@@ -17,6 +21,7 @@ auth is mocked, so nothing needs to be running on a backend yet.
 
 `npm run build` produces a production build in `dist/`.
 
+<<<<<<< HEAD
 ## Design system
 
 **Concept:** the same "scholarly reading room" language as NexStep's sibling luxury build —
@@ -47,6 +52,8 @@ tags — reads as a printed label rather than a SaaS status chip, and it's the o
 that repeats across nearly every screen, so it was worth getting right by hand rather than just
 recoloring the old shape.
 
+=======
+>>>>>>> origin/main
 ## What's implemented
 
 - **Landing page** — intro, features, sign up / log in
@@ -54,7 +61,10 @@ recoloring the old shape.
 - **Student profile** — personal + academic details, repeatable qualifications and work
   experience, conditional Master's/PhD "previous qualification" fields
 - **Dashboard** — student name, exam counts, upcoming deadlines, recent notifications, quick links
+<<<<<<< HEAD
 - **Assistant** (`/assistant`, new) — see below
+=======
+>>>>>>> origin/main
 - **Eligibility results** — automatic, filtered list (Eligible / Not eligible / All) — the student
   never selects an exam first
 - **Exam details** — full info per exam, including why the student is/isn't eligible
@@ -63,6 +73,7 @@ recoloring the old shape.
 - **Search/browse exams** — by name, organization, or category
 - **Profile/settings** — view, edit, log out
 
+<<<<<<< HEAD
 ## The Assistant (`/assistant`)
 
 A chat interface for asking about exams in plain language, personalized against the student's
@@ -81,12 +92,17 @@ sources citing the specific exam rule and the student's own profile.
   simple (keyword matching, single-thread conversation, no persisted history) given this sits
   alongside a much larger admin/student surface; swap `findAnswer` for a real API call when ready
 
+=======
+>>>>>>> origin/main
 ## Project structure
 
 ```
 src/
+<<<<<<< HEAD
   admin/          Admin portal — self-contained (own api/, context/, routes/, components/, pages/)
                   Reuses src/components/ui/* and src/utils/date.js for visual consistency.
+=======
+>>>>>>> origin/main
   api/            Mock API layer — the ONLY place that needs to change to plug in Vivek's backend
     client.js       fetch wrapper (JWT header injection, error handling) — already set up for real use
     auth.js         login / signup — replace mock bodies with request() calls (see comments inline)
@@ -94,13 +110,17 @@ src/
     exams.js        exam list + eligibility engine (computeEligibility) + search
     notifications.js
     mockData.js     seed data standing in for real API responses
+<<<<<<< HEAD
   data/
     assistantKnowledge.js   Assistant's answer matching — see above
+=======
+>>>>>>> origin/main
   context/        React context — Auth, Profile+Exams, Notifications
   routes/         Route guards (RequireAuth, RequireProfile)
   components/
     ui/             Button, Card, Field (Text/Select/Textarea), EligibilityPill, Logo
     layout/         PublicNavbar (landing/login/signup), AppShell (sidebar/bottom-nav for the app)
+<<<<<<< HEAD
     chat/           Assistant's UI: MessageBubble, MessageInput, SourcesPanel, StateBanner, EmptyState
   pages/          One file per screen
 ```
@@ -130,6 +150,11 @@ extraction → Retry → watch it process again → Approve → land on the exam
 page. The flagship "Civil Services Examination 2026" extraction in the mock data ships with a
 conflict and validation issues already populated so you can see those panels without waiting.
 
+=======
+  pages/          One file per screen
+```
+
+>>>>>>> origin/main
 ## Connecting Vivek's API
 
 1. Set `VITE_API_BASE_URL` in a `.env` file (see `.env.example`) to the real API's base URL.
@@ -142,6 +167,7 @@ conflict and validation issues already populated so you can see those panels wit
    there's a real eligibility endpoint, swap `getExams`/`getExamById` to call it directly instead
    of computing rules client-side.
 
+<<<<<<< HEAD
 ## Review pass
 
 This redesign went through the same three passes as the design brief called for: a **luxury**
@@ -153,3 +179,13 @@ their own container once both moved to the same recycled token — see `surface`
 the table above), and an **accessibility** pass on contrast (caught `slate-400` text sitting
 directly on the dark admin sidebar at ~2.8:1 — far under the 4.5:1 needed — and moved those
 specific instances to `slate-300`, which clears 9:1 against the sidebar's near-black).
+=======
+## Design notes
+
+- Color and type tokens live in `tailwind.config.js` (indigo/signal-green/amber palette,
+  Clash Display + Satoshi + JetBrains Mono).
+- The eligibility "pill" (`components/ui/EligibilityPill.jsx`) is the one repeating visual
+  language across the app — filled green for eligible, amber when a deadline is within 14 days,
+  outlined gray for not eligible.
+- Sidebar nav on desktop, bottom tab bar on mobile (`components/layout/AppShell.jsx`).
+>>>>>>> origin/main

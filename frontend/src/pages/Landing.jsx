@@ -41,13 +41,21 @@ export default function Landing() {
       <section className="mx-auto max-w-6xl px-6 pb-20 pt-16 md:pb-28 md:pt-24">
         <div className="grid items-center gap-16 md:grid-cols-2">
           <div>
+<<<<<<< HEAD
             <p className="mb-4 font-mono text-xs uppercase tracking-[0.2em] text-gold">
+=======
+            <p className="mb-4 font-mono text-xs uppercase tracking-[0.2em] text-indigo-600">
+>>>>>>> origin/main
               For students choosing what's next
             </p>
             <h1 className="font-display text-4xl font-semibold leading-[1.08] tracking-tight text-ink md:text-[3.4rem]">
               Stop searching exams.
               <br />
+<<<<<<< HEAD
               Let them find <span className="text-gold">you.</span>
+=======
+              Let them find <span className="text-indigo-700">you.</span>
+>>>>>>> origin/main
             </h1>
             <p className="mt-6 max-w-md text-lg leading-relaxed text-slate-600">
               NexStep reads your academic profile and automatically shows every exam
@@ -64,7 +72,11 @@ export default function Landing() {
               </Link>
               <Link
                 to="/login"
+<<<<<<< HEAD
                 className="inline-flex items-center gap-2 rounded-xl px-5 py-3 text-[15px] font-medium text-slate-700 ring-1 ring-inset ring-slate-200 transition hover:bg-surface"
+=======
+                className="inline-flex items-center gap-2 rounded-xl px-5 py-3 text-[15px] font-medium text-slate-700 ring-1 ring-inset ring-slate-200 transition hover:bg-white"
+>>>>>>> origin/main
               >
                 I already have an account
               </Link>
@@ -76,8 +88,13 @@ export default function Landing() {
             <div className="pointer-events-none absolute left-[10px] top-2 hidden h-[calc(100%-1rem)] w-px step-line md:block" />
             {STEPS.map((step) => (
               <div key={step.n} className={`relative flex-1 ${step.lift}`}>
+<<<<<<< HEAD
                 <div className="rounded-2xl border border-slate-200/70 bg-surface p-4 shadow-card">
                   <span className="font-mono text-xs text-gold">{step.n}</span>
+=======
+                <div className="rounded-2xl border border-slate-200/70 bg-white p-4 shadow-card">
+                  <span className="font-mono text-xs text-indigo-400">{step.n}</span>
+>>>>>>> origin/main
                   <h3 className="mt-1 font-display text-[15px] font-semibold text-ink">{step.title}</h3>
                   <p className="mt-1 text-xs leading-relaxed text-slate-500">{step.desc}</p>
                 </div>
@@ -88,7 +105,11 @@ export default function Landing() {
       </section>
 
       {/* Features */}
+<<<<<<< HEAD
       <section id="features" className="border-t border-slate-200/70 bg-slate-100">
+=======
+      <section id="features" className="border-t border-slate-200/70 bg-white/60">
+>>>>>>> origin/main
         <div className="mx-auto max-w-6xl px-6 py-20">
           <h2 className="max-w-lg font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
             Introducing NexStep

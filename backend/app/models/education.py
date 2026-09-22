@@ -1,4 +1,5 @@
 from __future__ import annotations
+from app.models.student import Student
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
@@ -21,7 +22,16 @@ class Education(Base):
     year_of_passing: Mapped[int | None]
     is_current: Mapped[bool | None]
 
+    # Added for the profile flow (see
+    # database/migrations/0002_profile_schema.sql).
+    institution: Mapped[str | None]
+    # e.g. "Final Year"/"Graduated" — the frontend's yearOfStudy is a
+    # label, not the numeric current_year above, so kept separate.
+    year_of_study_label: Mapped[str | None]
+    # True only on the single "previousQualification" entry — see
+    # migration 0002 for why this exists.
+    is_higher_qualification: Mapped[bool | None]
+
     student: Mapped["Student"] = relationship(
         back_populates="educations"
     )
-    

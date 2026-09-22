@@ -1,5 +1,9 @@
 import { Link } from "react-router-dom";
+<<<<<<< HEAD
 import { ListChecks, Search, ArrowRight, CalendarClock, Sparkles } from "lucide-react";
+=======
+import { ListChecks, Search, ArrowRight, CalendarClock } from "lucide-react";
+>>>>>>> origin/main
 import Card from "../components/ui/Card";
 import EligibilityPill from "../components/ui/EligibilityPill";
 import { useAuth } from "../context/AuthContext";
@@ -52,7 +56,11 @@ export default function Dashboard() {
         <Card className="lg:col-span-2">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="font-display text-base font-semibold text-ink">Upcoming deadlines & exam dates</h2>
+<<<<<<< HEAD
             <Link to="/upcoming" className="flex items-center gap-1 text-sm font-medium text-gold hover:underline">
+=======
+            <Link to="/upcoming" className="flex items-center gap-1 text-sm font-medium text-indigo-700 hover:underline">
+>>>>>>> origin/main
               View all <ArrowRight size={14} />
             </Link>
           </div>
@@ -81,7 +89,11 @@ export default function Dashboard() {
         <Card>
           <div className="mb-4 flex items-center justify-between">
             <h2 className="font-display text-base font-semibold text-ink">Recent notifications</h2>
+<<<<<<< HEAD
             <Link to="/notifications" className="flex items-center gap-1 text-sm font-medium text-gold hover:underline">
+=======
+            <Link to="/notifications" className="flex items-center gap-1 text-sm font-medium text-indigo-700 hover:underline">
+>>>>>>> origin/main
               View all <ArrowRight size={14} />
             </Link>
           </div>
@@ -100,6 +112,7 @@ export default function Dashboard() {
         </Card>
       </div>
 
+<<<<<<< HEAD
       <div className="grid gap-4 sm:grid-cols-3">
         <Link to="/assistant" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-surface p-5 shadow-card transition hover:border-indigo-200">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-700 text-white">
@@ -111,15 +124,28 @@ export default function Dashboard() {
           </div>
         </Link>
         <Link to="/eligibility" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-surface p-5 shadow-card transition hover:border-indigo-200">
+=======
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Link to="/eligibility" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-white p-5 shadow-card transition hover:border-indigo-200">
+>>>>>>> origin/main
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-700 text-white">
             <ListChecks size={18} />
           </div>
           <div>
+<<<<<<< HEAD
             <p className="font-display font-semibold text-ink">Eligibility results</p>
             <p className="text-sm text-slate-500">Every exam, checked against your profile.</p>
           </div>
         </Link>
         <Link to="/search" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-surface p-5 shadow-card transition hover:border-indigo-200">
+=======
+            <p className="font-display font-semibold text-ink">See your eligibility results</p>
+            <p className="text-sm text-slate-500">Every exam, checked against your profile.</p>
+          </div>
+          <ArrowRight size={16} className="ml-auto shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-indigo-600" />
+        </Link>
+        <Link to="/search" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-white p-5 shadow-card transition hover:border-indigo-200">
+>>>>>>> origin/main
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-700 text-white">
             <Search size={18} />
           </div>
@@ -127,12 +153,20 @@ export default function Dashboard() {
             <p className="font-display font-semibold text-ink">Browse all exams</p>
             <p className="text-sm text-slate-500">Search by name, organization, or category.</p>
           </div>
+<<<<<<< HEAD
+=======
+          <ArrowRight size={16} className="ml-auto shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-indigo-600" />
+>>>>>>> origin/main
         </Link>
       </div>
 
       {eligibleExams.length === 0 && !loading && (
         <Card className="flex items-center gap-4 bg-indigo-50/50">
+<<<<<<< HEAD
           <CalendarClock size={20} className="shrink-0 text-gold" />
+=======
+          <CalendarClock size={20} className="shrink-0 text-indigo-700" />
+>>>>>>> origin/main
           <p className="text-sm text-slate-700">
             Nothing's matched yet — that updates automatically as exams are added or your profile changes.
           </p>

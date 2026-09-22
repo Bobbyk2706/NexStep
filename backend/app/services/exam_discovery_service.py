@@ -1,31 +1,62 @@
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
+import pymupdf
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-import pymupdf
+
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+STORAGE_DIR = (
+    BASE_DIR
+    / "storage"
+    / "notifications"
+)
+
+STORAGE_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+# ============================================================
+# WEBSITE FETCHING
+# ============================================================
 
 
 def fetch_website(url):
-
     response = requests.get(
         url,
-        timeout=20
+        timeout=20,
     )
 
     response.raise_for_status()
 
     content_type = response.headers.get(
         "Content-Type",
-        ""
+        "",
     )
 
     return response, content_type
 
 
-def extract_links(html, base_url):
+# ============================================================
+# LINK EXTRACTION
+# ============================================================
 
+
+def extract_links(
+    html,
+    base_url,
+):
     soup = BeautifulSoup(
         html,
-        "html.parser"
+        "html.parser",
     )
 
     links = soup.find_all("a")
@@ -40,7 +71,9 @@ def extract_links(html, base_url):
         if not href:
             continue
 
-        if href.startswith("javascript:"):
+        if href.startswith(
+            "javascript:"
+        ):
             continue
 
         if href.startswith("#"):
@@ -48,10 +81,12 @@ def extract_links(html, base_url):
 
         full_url = urljoin(
             base_url,
-            href
+            href,
         )
 
-        if not full_url.startswith("https"):
+        if not full_url.startswith(
+            "https"
+        ):
             continue
 
         if full_url in seen_urls:
@@ -63,85 +98,237 @@ def extract_links(html, base_url):
             strip=True
         )
 
-        relevant_links.append({
-            "url": full_url,
-            "text": text
-        })
+        relevant_links.append(
+            {
+                "url": full_url,
+                "text": text,
+            }
+        )
 
     return relevant_links
 
 
-def is_pdf(content_type, url):
+# ============================================================
+# PDF DETECTION
+# ============================================================
+
+
+def is_pdf(
+    content_type,
+    url,
+):
+    """
+    Determine whether a resource is likely a PDF based on
+    HTTP Content-Type or URL.
+
+    Actual downloaded content is validated separately.
+    """
 
     if (
-        "application/pdf" in content_type.lower()
-        or
-        url.lower().endswith(".pdf")
+        "application/pdf"
+        in content_type.lower()
     ):
+        return True
+
+    if url.lower().endswith(".pdf"):
         return True
 
     return False
 
 
-def download_pdf(url):
+def _has_pdf_signature(
+    content,
+):
+    """
+    Check the PDF magic number.
+
+    A valid PDF begins with:
+
+        %PDF-
+    """
+
+    return content.startswith(
+        b"%PDF-"
+    )
+
+
+# ============================================================
+# PDF STORAGE
+# ============================================================
+
+
+def get_pdf_filename(url):
+    parsed_url = urlparse(url)
+
+    filename = os.path.basename(
+        parsed_url.path
+    )
+
+    if not filename:
+        filename = "document.pdf"
+
+    if not filename.lower().endswith(
+        ".pdf"
+    ):
+        filename += ".pdf"
+
+    return filename
+
+
+def download_pdf(
+    url,
+    save_to_storage=True,
+):
+    """
+    Download and validate a PDF.
+
+    The downloaded bytes are always returned.
+
+    When save_to_storage=True, the PDF is also persisted
+    under the notification storage directory.
+
+    Monitoring can use save_to_storage=False so that a newly
+    detected document cannot overwrite the currently approved
+    document before HITL approval.
+    """
 
     response = requests.get(
         url,
-        timeout=20
+        timeout=20,
     )
 
     response.raise_for_status()
 
     content_type = response.headers.get(
         "Content-Type",
-        ""
+        "",
     ).lower()
 
-    if "application/pdf" not in content_type:
+    pdf_content = response.content
+
+    if not pdf_content:
         raise ValueError(
-            f"Expected PDF but received: {content_type}"
+            "Downloaded document is empty."
         )
 
-    return response.content
+    if not _has_pdf_signature(
+        pdf_content
+    ):
+        raise ValueError(
+            "Downloaded content is not a valid PDF."
+        )
+
+    document_hash = hashlib.sha256(
+        pdf_content
+    ).hexdigest()
+
+    result = {
+        "content": pdf_content,
+        "url": url,
+        "document_hash": document_hash,
+        "content_type": content_type,
+    }
+
+    if save_to_storage:
+
+        filename = get_pdf_filename(
+            url
+        )
+
+        file_path = (
+            STORAGE_DIR
+            / filename
+        )
+
+        with open(
+            file_path,
+            "wb",
+        ) as file:
+            file.write(
+                pdf_content
+            )
+
+        result["path"] = str(
+            file_path
+        )
+
+    return result
 
 
-def extract_pdf_text(pdf_content):
+# ============================================================
+# PDF TEXT EXTRACTION
+# ============================================================
+
+
+def extract_pdf_text(
+    pdf_content,
+):
+    if not pdf_content:
+        raise ValueError(
+            "PDF content is empty."
+        )
+
+    if not _has_pdf_signature(
+        pdf_content
+    ):
+        raise ValueError(
+            "Content is not a valid PDF."
+        )
 
     doc = pymupdf.open(
         stream=pdf_content,
-        filetype="pdf"
+        filetype="pdf",
     )
 
-    text = ""
+    try:
+        text = ""
 
-    for page in doc:
-        text += page.get_text() + "\n"
+        for page in doc:
+            text += (
+                page.get_text()
+                + "\n"
+            )
 
-    doc.close()
+        return text
 
-    return text
+    finally:
+        doc.close()
 
 
-def discover_exam_sources(official_url):
+# ============================================================
+# DIRECT SOURCE DISCOVERY
+# ============================================================
 
+
+def discover_exam_sources(
+    official_url,
+):
     response, content_type = fetch_website(
         official_url
     )
 
-    if is_pdf(content_type, official_url):
-
-        pdf_content = download_pdf(
+    if is_pdf(
+        content_type,
+        official_url,
+    ):
+        pdf = download_pdf(
             official_url
         )
 
         text = extract_pdf_text(
-            pdf_content
+            pdf["content"]
         )
 
         return {
             "url": official_url,
             "content_type": content_type,
-            "text": text
+            "text": text,
+            "content": pdf["content"],
+            "pdf_path": pdf["path"],
+            "document_url": pdf["url"],
+            "document_hash": pdf[
+                "document_hash"
+            ],
         }
 
     if "text/html" not in content_type.lower():
@@ -149,30 +336,39 @@ def discover_exam_sources(official_url):
 
     links = extract_links(
         response.text,
-        official_url
+        official_url,
     )
 
-    return {
-        "url": official_url,
-        "content_type": content_type,
-        "text": response.text,
-        "links": links
-    }
+    return links
+
+
+# ============================================================
+# CONTROLLED CRAWLING
+# ============================================================
 
 
 MAX_DEPTH = 2
 
 
-def crawl_exam_sources(official_url):
-
+def crawl_exam_sources(
+    official_url,
+):
     visited = set()
-    to_visit = [(official_url, 0)]
+
+    to_visit = [
+        (
+            official_url,
+            0,
+        )
+    ]
 
     discovered_sources = []
 
     while to_visit:
 
-        current_url, depth = to_visit.pop(0)
+        current_url, depth = (
+            to_visit.pop(0)
+        )
 
         if current_url in visited:
             continue
@@ -180,53 +376,89 @@ def crawl_exam_sources(official_url):
         if depth > MAX_DEPTH:
             continue
 
-        visited.add(current_url)
+        visited.add(
+            current_url
+        )
 
         try:
-            response, content_type = fetch_website(
-                current_url
+            response, content_type = (
+                fetch_website(
+                    current_url
+                )
             )
 
-        except Exception as e:
+        except Exception as error:
             print(
                 "Failed:",
                 current_url,
-                e
+                error,
             )
             continue
 
-        if is_pdf(content_type, current_url):
+        # ----------------------------------------------------
+        # PDF SOURCE
+        # ----------------------------------------------------
+
+        if is_pdf(
+            content_type,
+            current_url,
+        ):
 
             try:
-                pdf_content = download_pdf(
+                pdf = download_pdf(
                     current_url
                 )
 
                 text = extract_pdf_text(
-                    pdf_content
+                    pdf["content"]
                 )
 
-                discovered_sources.append({
-                    "url": current_url,
-                    "content_type": content_type,
-                    "text": text
-                })
+                discovered_sources.append(
+                    {
+                        "url": current_url,
+                        "content_type": content_type,
+                        "text": text,
+                        "content": pdf[
+                            "content"
+                        ],
+                        "pdf_path": pdf[
+                            "path"
+                        ],
+                        "document_url": pdf[
+                            "url"
+                        ],
+                        "document_hash": pdf[
+                            "document_hash"
+                        ],
+                    }
+                )
 
-            except Exception as e:
+            except Exception as error:
                 print(
                     "PDF failed:",
                     current_url,
-                    e
+                    error,
                 )
 
             continue
 
-        if "text/html" not in content_type.lower():
+        # ----------------------------------------------------
+        # NON-HTML RESOURCE
+        # ----------------------------------------------------
+
+        if (
+            "text/html"
+            not in content_type.lower()
+        ):
             continue
+
+        # ----------------------------------------------------
+        # HTML PAGE
+        # ----------------------------------------------------
 
         links = extract_links(
             response.text,
-            current_url
+            current_url,
         )
 
         for link in links:
@@ -236,12 +468,16 @@ def crawl_exam_sources(official_url):
             if next_url in visited:
                 continue
 
-            discovered_sources.append(link)
+            discovered_sources.append(
+                link
+            )
 
             if depth < MAX_DEPTH:
-
                 to_visit.append(
-                    (next_url, depth + 1)
+                    (
+                        next_url,
+                        depth + 1,
+                    )
                 )
 
     return discovered_sources
