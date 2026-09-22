@@ -40,11 +40,7 @@ export default function Settings() {
         <Card>
           <div className="mb-2 flex items-center justify-between">
             <h2 className="font-display text-base font-semibold text-ink">Academic details</h2>
-<<<<<<< HEAD
             <Link to="/profile/setup" className="flex items-center gap-1.5 text-sm font-medium text-gold hover:underline">
-=======
-            <Link to="/profile/setup" className="flex items-center gap-1.5 text-sm font-medium text-indigo-700 hover:underline">
->>>>>>> origin/main
               <Pencil size={14} /> Edit
             </Link>
           </div>
@@ -67,11 +63,7 @@ export default function Settings() {
       {!loading && !profile && (
         <Card className="flex items-center justify-between">
           <p className="text-sm text-slate-500">You haven't built your profile yet.</p>
-<<<<<<< HEAD
           <Link to="/profile/setup" className="text-sm font-medium text-gold hover:underline">
-=======
-          <Link to="/profile/setup" className="text-sm font-medium text-indigo-700 hover:underline">
->>>>>>> origin/main
             Build profile
           </Link>
         </Card>

@@ -38,11 +38,7 @@ export default function SearchExams() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search exams, e.g. GATE, IIM, civil services..."
-<<<<<<< HEAD
           className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 text-[15px] text-ink placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-=======
-          className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-4 text-[15px] text-ink placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
->>>>>>> origin/main
         />
       </div>
 
@@ -66,11 +62,7 @@ export default function SearchExams() {
             </div>
             <Link
               to={`/exams/${exam.id}`}
-<<<<<<< HEAD
               className="shrink-0 rounded-xl px-4 py-2 text-center text-sm font-medium text-gold ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
-=======
-              className="shrink-0 rounded-xl px-4 py-2 text-center text-sm font-medium text-indigo-700 ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
->>>>>>> origin/main
             >
               View details
             </Link>
