@@ -56,7 +56,7 @@ def extract_exam_name(text):
     )
 
     return candidates[0][1]
-import re
+
 
 
 def extract_dates(text):
@@ -98,18 +98,6 @@ def extract_dates(text):
     )
 
     return matches
-import re
-from datetime import datetime
-
-
-import re
-from datetime import datetime
-
-
-import re
-from datetime import datetime
-
-
 def normalize_date(date_string):
 
     date_string = date_string.strip()

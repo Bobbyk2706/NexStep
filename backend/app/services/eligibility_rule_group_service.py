@@ -1,31 +1,48 @@
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.database.session import SessionLocal
 from app.models.official_notification import OfficialNotification
 from app.models.eligibility_rule_group import EligibilityRuleGroup
 
 
 def create_rule_group(
-    notification_id,
-    group_name,
-    group_type
+    session: Session,
+    notification_id: int,
+    group_number: int,
+    logical_operator: str,
+    parent_group_id: int | None = None
 ):
-    with SessionLocal() as s:
+    notification = session.scalar(
+        select(OfficialNotification).where(
+            OfficialNotification.notification_id == notification_id
+        )
+    )
 
-        notification = s.scalar(
-            select(OfficialNotification).where(
-                OfficialNotification.notification_id == notification_id
+    if notification is None:
+        raise ValueError(
+            "Official notification not found."
+        )
+
+    if parent_group_id is not None:
+        parent_group = session.scalar(
+            select(EligibilityRuleGroup).where(
+                EligibilityRuleGroup.group_id == parent_group_id
             )
         )
 
-        rule_group = EligibilityRuleGroup(
-            group_name=group_name,
-            group_type=group_type
-        )
+        if parent_group is None:
+            raise ValueError(
+                "Parent eligibility rule group not found."
+            )
 
-        notification.rule_groups.append(rule_group)
+    rule_group = EligibilityRuleGroup(
+        notification_id=notification_id,
+        group_number=group_number,
+        logical_operator=logical_operator,
+        parent_group_id=parent_group_id
+    )
 
-        s.add(rule_group)
-        s.commit()
+    session.add(rule_group)
+    session.flush()
 
-        return rule_group.rule_group_id
+    return rule_group.group_id
