@@ -1,8 +1,8 @@
 const variants = {
-  primary: "bg-indigo-700 text-white hover:bg-indigo-600 disabled:bg-indigo-300",
-  secondary: "bg-white text-indigo-700 ring-1 ring-inset ring-indigo-100 hover:bg-indigo-50 disabled:text-slate-300",
-  ghost: "text-slate-600 hover:bg-slate-50 disabled:text-slate-300",
-  danger: "bg-white text-amber-600 ring-1 ring-inset ring-amber-200 hover:bg-amber-50",
+  primary: "bg-indigo-700 text-white hover:bg-indigo-600 disabled:bg-slate-300 disabled:text-slate-500",
+  secondary: "bg-surface text-gold ring-1 ring-inset ring-indigo-100 hover:bg-indigo-50 disabled:text-slate-300",
+  ghost: "text-slate-600 hover:bg-surface disabled:text-slate-300",
+  danger: "bg-surface text-amber-600 ring-1 ring-inset ring-amber-200 hover:bg-amber-50",
 };
 
 export default function Button({

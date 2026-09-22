@@ -9,8 +9,8 @@ export default function PublicNavbar() {
           <Logo />
         </Link>
         <nav className="hidden items-center gap-8 text-sm font-medium text-slate-600 md:flex">
-          <a href="#features" className="hover:text-ink">Features</a>
-          <a href="#how-it-works" className="hover:text-ink">How it works</a>
+          <a href="#features" className="border-b border-transparent pb-0.5 transition hover:border-gold/50 hover:text-ink">Features</a>
+          <a href="#how-it-works" className="border-b border-transparent pb-0.5 transition hover:border-gold/50 hover:text-ink">How it works</a>
         </nav>
         <div className="flex items-center gap-3">
           <Link to="/login" className="text-sm font-medium text-slate-700 hover:text-ink">
