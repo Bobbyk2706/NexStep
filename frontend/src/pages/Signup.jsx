@@ -98,7 +98,7 @@ export default function Signup() {
 
         <p className="mt-8 text-center text-sm text-slate-500">
           Already on NexStep?{" "}
-          <Link to="/login" className="font-medium text-indigo-700 hover:underline">
+          <Link to="/login" className="font-medium text-gold hover:underline">
             Log in
           </Link>
         </p>

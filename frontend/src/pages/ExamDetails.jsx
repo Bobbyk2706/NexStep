@@ -31,7 +31,7 @@ export default function ExamDetails() {
     return (
       <Card>
         <p className="text-sm text-slate-500">We couldn't find that exam.</p>
-        <Link to="/eligibility" className="mt-3 inline-block text-sm font-medium text-indigo-700 hover:underline">
+        <Link to="/eligibility" className="mt-3 inline-block text-sm font-medium text-gold hover:underline">
           Back to eligibility results
         </Link>
       </Card>

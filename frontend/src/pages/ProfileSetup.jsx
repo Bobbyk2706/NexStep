@@ -149,11 +149,11 @@ export default function ProfileSetup() {
 
           <Card className="flex flex-col gap-5">
             <div className="flex items-start gap-3 rounded-xl bg-indigo-50 p-4">
-              <GraduationCap size={18} className="mt-0.5 shrink-0 text-indigo-700" />
+              <GraduationCap size={18} className="mt-0.5 shrink-0 text-gold" />
               <label className="flex flex-1 cursor-pointer items-start gap-3 text-sm text-slate-700">
                 <input
                   type="checkbox"
-                  className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-700 focus:ring-indigo-500"
+                  className="mt-0.5 h-4 w-4 rounded border-slate-300 text-gold focus:ring-indigo-500"
                   checked={hasHigherQualification}
                   onChange={(e) => setHasHigherQualification(e.target.checked)}
                 />

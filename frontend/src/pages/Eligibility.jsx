@@ -34,7 +34,7 @@ export default function Eligibility() {
             key={f}
             onClick={() => setFilter(f)}
             className={`rounded-xl px-3.5 py-1.5 text-sm font-medium transition ${
-              filter === f ? "bg-indigo-700 text-white" : "bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+              filter === f ? "bg-indigo-700 text-white" : "bg-surface text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
             }`}
           >
             {f}
@@ -65,7 +65,7 @@ export default function Eligibility() {
             </div>
             <Link
               to={`/exams/${exam.id}`}
-              className="shrink-0 rounded-xl px-4 py-2 text-center text-sm font-medium text-indigo-700 ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
+              className="shrink-0 rounded-xl px-4 py-2 text-center text-sm font-medium text-gold ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
             >
               View details
             </Link>
