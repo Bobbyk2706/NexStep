@@ -1,18 +1,11 @@
-import os
-
-from dotenv import load_dotenv
-from google import genai
-
-from app.ai.exam_schemas import ExamInformation
-from app.ai.schemas import EligibilityRulesData
 from app.ai.extraction_schemas import CompleteExtractionData
-
-
-load_dotenv()
-
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+from app.ai.provider_manager import (
+    AIProviderManager,
+    AllAIProvidersFailedError,
 )
+
+
+_provider_manager = AIProviderManager()
 
 
 def extract_complete_information(
@@ -300,15 +293,42 @@ OFFICIAL EXAMINATION DOCUMENT
 {text}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": CompleteExtractionData,
-        },
-    )
+    response_schema = CompleteExtractionData.model_json_schema()
 
-    return CompleteExtractionData.model_validate_json(
-        response.text
-    )
+    def validate_response(content: str) -> CompleteExtractionData:
+        return CompleteExtractionData.model_validate_json(content)
+
+    try:
+        result = _provider_manager.generate(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict structured extraction "
+                        "system. Extract only facts supported by "
+                        "the supplied official document text."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            response_schema=response_schema,
+            validator=validate_response,
+            temperature=0.0,
+            max_tokens=8192,
+        )
+    except AllAIProvidersFailedError as exc:
+        raise RuntimeError(
+            "Complete extraction failed because all configured "
+            "AI providers failed or returned invalid structured "
+            "data."
+        ) from exc
+
+    if not isinstance(result, CompleteExtractionData):
+        raise RuntimeError(
+            "Complete extraction returned an unexpected result type."
+        )
+
+    return result

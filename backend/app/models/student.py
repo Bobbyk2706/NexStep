@@ -30,7 +30,7 @@ class Student(Base):
     # refresh token's embedded "trv" claim can be checked against it to
     # revoke old sessions.
     token_version: Mapped[str | None]
-
+    
 
 
 

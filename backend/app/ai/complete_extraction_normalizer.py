@@ -19,7 +19,7 @@ def normalize_date(value: str | None) -> str | None:
     except ValueError:
         pass
 
-    # Common formats Gemini may return
+    # Common formats an AI provider may return
     formats = [
         "%d %B, %Y",
         "%d %B %Y",

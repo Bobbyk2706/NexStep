@@ -93,6 +93,12 @@ def get_exam(exam_id: int):
 
     notification = get_latest_approved_notification(exam_id)
 
+    if notification is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Exam is not available until an official notification is approved.",
+        )
+
     return {
         "exam_id": exam.exam_id,
         "name": exam.name,

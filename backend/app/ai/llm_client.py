@@ -1,38 +1,46 @@
 from __future__ import annotations
 
-import json
-import os
-
-from dotenv import load_dotenv
-from groq import Groq
-from pydantic import ValidationError
-
 from app.ai.exam_schemas import ExamInformation
-
-
-load_dotenv()
-
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY is not configured."
-    )
-
-
-client = Groq(
-    api_key=GROQ_API_KEY,
+from app.ai.provider_manager import (
+    AIProviderManager,
+    AllAIProvidersFailedError,
 )
 
 
-MODEL_NAME = "openai/gpt-oss-120b"
+# ============================================================
+# PROVIDER MANAGER
+# ============================================================
+
+_provider_manager = AIProviderManager()
+
+
+# ============================================================
+# EXAM INFORMATION EXTRACTION
+# ============================================================
 
 
 def extract_exam_information(
     text: str,
     feedback: str | None = None,
 ) -> ExamInformation:
+    """
+    Extract structured exam information from an official
+    examination document.
+
+    The AI provider chain is:
+
+        Groq → OpenRouter → Local Ollama
+
+    Provider-specific failures are handled by the provider
+    manager.
+
+    The application's Pydantic model remains the authoritative
+    validation layer.
+    """
+
+    # ========================================================
+    # ADMIN FEEDBACK
+    # ========================================================
 
     feedback_instruction = ""
 
@@ -46,6 +54,10 @@ Use this feedback to carefully correct the extraction.
 Re-examine the original document and make corrections
 only when supported by the document.
 """
+
+    # ========================================================
+    # PROMPT
+    # ========================================================
 
     prompt = f"""
 Extract exam information from the following official
@@ -76,44 +88,69 @@ ORIGINAL OFFICIAL DOCUMENT:
 {text}
 """
 
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict information extraction system. "
-                    "Extract only information explicitly supported "
-                    "by the supplied official document."
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "exam_information",
-                "strict": False,
-                "schema": ExamInformation.model_json_schema(),
-            },
-        },
-    )
+    # ========================================================
+    # RESPONSE SCHEMA
+    # ========================================================
 
-    content = response.choices[0].message.content
+    response_schema = ExamInformation.model_json_schema()
 
-    if not content:
-        raise RuntimeError(
-            "Groq returned an empty response."
+    # ========================================================
+    # VALIDATOR
+    # ========================================================
+
+    def validate_response(
+        content: str,
+    ) -> ExamInformation:
+        """
+        Validate the provider response against the application's
+        authoritative ExamInformation Pydantic model.
+        """
+
+        return ExamInformation.model_validate_json(
+            content
         )
+
+    # ========================================================
+    # PROVIDER CHAIN
+    # ========================================================
 
     try:
-        return ExamInformation.model_validate(
-            json.loads(content)
+        result = _provider_manager.generate(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict information extraction "
+                        "system. Extract only information explicitly "
+                        "supported by the supplied official document."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            response_schema=response_schema,
+            validator=validate_response,
+            temperature=0.0,
+            max_tokens=4096,
         )
-    except (json.JSONDecodeError, ValidationError) as exc:
+
+    except AllAIProvidersFailedError as exc:
         raise RuntimeError(
-            "Groq returned exam data that failed validation."
+            "Exam-information extraction failed because all "
+            "configured AI providers failed or returned invalid "
+            "structured data."
         ) from exc
+
+    # ========================================================
+    # SAFETY CHECK
+    # ========================================================
+
+    if not isinstance(result, ExamInformation):
+        raise RuntimeError(
+            "Exam-information extraction returned an unexpected "
+            "result type."
+        )
+
+    return result
