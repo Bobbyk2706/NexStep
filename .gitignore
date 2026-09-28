@@ -24,3 +24,7 @@ node_modules/
 storage/
 #test files
 tests/
+test_login_selenium.py
+test_login.py
+
+package-lock.json

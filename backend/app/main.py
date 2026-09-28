@@ -38,9 +38,9 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api")
 app.include_router(eligibility_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
-app.include_router(admin_review_router)
+#app.include_router(admin_review_router)
 app.include_router(tracked_exam_router, prefix="/api")
-app.include_router(exam_router, prefix="/api")
+#app.include_router(exam_router, prefix="/api")
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc: HTTPException):
     """FastAPI's default error body is {"detail": ...}. The frontend's
