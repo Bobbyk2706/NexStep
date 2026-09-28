@@ -32,7 +32,7 @@ _DEFAULT_MAX_WORKERS = max(
     int(
         os.environ.get(
             "NEXSTEP_CHUNK_EXTRACTION_WORKERS",
-            "1",
+            "4",
         )
     ),
 )
