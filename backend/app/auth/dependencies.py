@@ -1,6 +1,6 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError
+from jose import ExpiredSignatureError, JWTError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
@@ -35,6 +35,12 @@ def get_current_principal(
     )
     try:
         payload = decode_token(creds.credentials)
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except JWTError:
         raise credentials_exception
 

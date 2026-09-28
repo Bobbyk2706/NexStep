@@ -1,14 +1,41 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import * as adminAuthApi from "../api/adminAuth";
-import { getAdminToken } from "../api/adminAuth";
+import { getAdminToken, onAdminSessionExpired } from "../api/adminClient";
 
 const AdminAuthContext = createContext(null);
 
 export function AdminAuthProvider({ children }) {
-  const [admin, setAdmin] = useState(() => {
-    const token = getAdminToken();
-    return token ? { name: "Admin", email: "" } : null;
-  });
+  const [admin, setAdmin] = useState(null);
+  // Only "checking" if there's a stored token to validate.
+  const [checking, setChecking] = useState(() => Boolean(getAdminToken()));
+
+  // A token sitting in localStorage proves nothing — ask the backend.
+  useEffect(() => {
+    let cancelled = false;
+    if (!getAdminToken()) {
+      setChecking(false);
+      return;
+    }
+    adminAuthApi
+      .fetchAdminSession()
+      .then((a) => {
+        if (!cancelled) setAdmin(a);
+      })
+      .catch(() => {
+        // 401s already cleared the session inside the client; anything else
+        // (e.g. backend down) leaves admin null, so the guard sends them to
+        // /login instead of showing a dashboard we can't back with data.
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Any later API call that comes back 401 (after a failed refresh) lands here.
+  useEffect(() => onAdminSessionExpired(() => setAdmin(null)), []);
 
   async function login(credentials) {
     const res = await adminAuthApi.adminLogin(credentials);
@@ -22,7 +49,7 @@ export function AdminAuthProvider({ children }) {
   }
 
   return (
-    <AdminAuthContext.Provider value={{ admin, login, logout }}>
+    <AdminAuthContext.Provider value={{ admin, checking, login, logout }}>
       {children}
     </AdminAuthContext.Provider>
   );
