@@ -30,7 +30,7 @@ def monitor_notification(
     It does NOT:
         - overwrite approved data
         - create a new extraction
-        - run Gemini
+        - run AI semantic extraction
         - approve changes
         - reject changes
         - re-evaluate students

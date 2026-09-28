@@ -1,12 +1,17 @@
 // Central API client.
 //
-// Right now every function in src/api/*.js reads from the mock data in
-// mockData.js so the whole app runs with no backend. When Vivek's API is
-// ready, point BASE_URL at it and each api/*.js file can swap its mock
-// body for a call to `request(...)` below — the rest of the app (pages,
-// components) never touches fetch directly, so nothing else changes.
+// createClient() builds a fetch wrapper with 401 handling, so the student
+// app and the admin app can share the same logic while keeping separate
+// tokens (an admin session must never double as a student session).
+//
+// When a request that carried a token comes back 401, the session is no
+// longer valid. The client (optionally) tries a token refresh once, retries,
+// and if it is still 401 calls onUnauthorized() so the owning auth context
+// can clear its state — RequireAuth / RequireAdminAuth then redirect to
+// /login. A 401 on a request that sent no token (e.g. a wrong password on
+// login) is just a failed attempt and does NOT count as an expired session.
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
+export const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
 
 const TOKEN_KEY = "nexstep_token";
 
@@ -19,33 +24,6 @@ export function setToken(token) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
-export async function request(path, { method = "GET", body, headers = {} } = {}) {
-  const token = getToken();
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...headers,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  if (!res.ok) {
-    let message = `Request failed (${res.status})`;
-    try {
-      const data = await res.json();
-      message = data.message || data.error || message;
-    } catch {
-      // response wasn't JSON — keep the generic message
-    }
-    throw new ApiError(message, res.status);
-  }
-
-  if (res.status === 204) return null;
-  return res.json();
-}
-
 export class ApiError extends Error {
   constructor(message, status) {
     super(message);
@@ -53,6 +31,64 @@ export class ApiError extends Error {
     this.status = status;
   }
 }
+
+export function createClient({ getToken, refresh, onUnauthorized }) {
+  async function send(path, { method, body, headers }) {
+    const token = getToken();
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...headers,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { res, sentToken: Boolean(token) };
+  }
+
+  // `auth: false` opts a call out of session-expiry handling (login, logout).
+  return async function request(path, { method = "GET", body, headers = {}, auth = true } = {}) {
+    const opts = { method, body, headers };
+    let { res, sentToken } = await send(path, opts);
+
+    if (res.status === 401 && auth && sentToken) {
+      if (refresh && (await refresh())) {
+        ({ res } = await send(path, opts));
+      }
+      if (res.status === 401) onUnauthorized?.();
+    }
+
+    if (!res.ok) {
+      let message = `Request failed (${res.status})`;
+      try {
+        const data = await res.json();
+        message = data.message || data.error || message;
+      } catch {
+        // response wasn't JSON — keep the generic message
+      }
+      throw new ApiError(message, res.status);
+    }
+
+    if (res.status === 204) return null;
+    return res.json();
+  };
+}
+
+// Student session: subscribe to be told when the token stops being valid.
+const expiredListeners = new Set();
+export function onSessionExpired(fn) {
+  expiredListeners.add(fn);
+  return () => expiredListeners.delete(fn);
+}
+
+export const request = createClient({
+  getToken,
+  onUnauthorized() {
+    setToken(null);
+    expiredListeners.forEach((fn) => fn());
+  },
+});
 
 // Small helper so mock modules can simulate network latency without
 // every file re-implementing a sleep function.

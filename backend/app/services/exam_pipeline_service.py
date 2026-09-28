@@ -11,8 +11,8 @@ from app.ai.aggregated_extraction_result import (
 from app.ai.chunk_aggregator import (
     aggregate_chunk_extractions,
 )
-from app.ai.chunk_extractor import (
-    extract_chunk_information,
+from app.ai.parallel_chunk_extraction import (
+    extract_chunks_in_parallel,
 )
 from app.ai.complete_extraction_normalizer import (
     normalize_complete_extraction,
@@ -201,16 +201,13 @@ def process_exam(
     # 6. AI EXTRACTION — EVERY CHUNK
     # ========================================================
 
-    chunk_results = []
+    try:
+        chunk_results = extract_chunks_in_parallel(chunks)
 
-    for chunk in chunks:
-        result = extract_chunk_information(
-            chunk
-        )
-
-        chunk_results.append(
-            result
-        )
+    except Exception as error:
+        raise ValueError(
+            f"AI extraction failed on one or more chunks: {error}"
+        ) from error
 
     if not chunk_results:
         raise ValueError(

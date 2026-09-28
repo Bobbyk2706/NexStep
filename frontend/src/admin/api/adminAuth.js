@@ -1,34 +1,43 @@
-import { mockDelay } from "../../api/client";
+import {
+  adminRequest,
+  getAdminToken,
+  setAdminSession,
+  clearAdminSession,
+} from "./adminClient";
 
-const ADMIN_TOKEN_KEY = "nexstep_admin_token";
+export { getAdminToken };
 
-export function getAdminToken() {
-  return localStorage.getItem(ADMIN_TOKEN_KEY);
-}
-
-function setAdminToken(token) {
-  if (token) localStorage.setItem(ADMIN_TOKEN_KEY, token);
-  else localStorage.removeItem(ADMIN_TOKEN_KEY);
-}
-
-// Mocked. Replace with:
-//   return request("/admin/auth/login", { method: "POST", body: { email, password } });
-// using a request() helper pointed at the admin API base — keep this on a
-// separate base URL / auth scheme from the student app if your backend
-// splits them, since admin sessions should never double as student sessions.
+// Backend: POST /auth/admin/login -> { access_token, refresh_token }, then
+// GET /auth/me for the admin's name/email. Adapted here (rather than adding
+// a new backend route) so the rest of the admin UI keeps getting the
+// { token, admin } shape it already expects.
 export async function adminLogin({ email, password }) {
-  await mockDelay(300);
-  if (!email || !password) {
-    throw new Error("Enter your email and password.");
-  }
-  if (password.length < 6) {
-    throw new Error("Invalid credentials.");
-  }
-  const token = `mock.admin.${btoa(email)}.token`;
-  setAdminToken(token);
-  return { token, admin: { name: email.split("@")[0], email } };
+  const tokens = await adminRequest("/auth/admin/login", {
+    method: "POST",
+    body: { email, password },
+    auth: false,
+  });
+  setAdminSession({ access: tokens.access_token, refresh: tokens.refresh_token });
+  const admin = await fetchAdminSession();
+  return { token: tokens.access_token, admin };
+}
+
+// Validates the stored token against the backend. Used on page load so a
+// stale/expired token can't keep the admin UI open.
+export async function fetchAdminSession() {
+  const me = await adminRequest("/auth/me");
+  return { name: me.name, email: me.email };
 }
 
 export function adminLogout() {
-  setAdminToken(null);
+  const token = getAdminToken();
+  clearAdminSession();
+  if (token) {
+    // Best effort: tells the backend to revoke this admin's refresh tokens.
+    adminRequest("/auth/logout", {
+      method: "POST",
+      auth: false,
+      headers: { Authorization: `Bearer ${token}` },
+    }).catch(() => {});
+  }
 }

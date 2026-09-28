@@ -55,7 +55,15 @@ def get_all_exams(db: Session | None = None):
     try:
         statement = (
             select(Exam)
+            .join(
+                OfficialNotification,
+                OfficialNotification.exam_id == Exam.exam_id,
+            )
+            .where(
+                OfficialNotification.approval_status == "APPROVED"
+            )
             .options(selectinload(Exam.body))
+            .distinct()
             .order_by(Exam.name.asc())
         )
 
@@ -113,13 +121,19 @@ def search_exams(
 
         statement = (
             select(Exam)
-            .options(selectinload(Exam.body))
+            .join(
+                OfficialNotification,
+                OfficialNotification.exam_id == Exam.exam_id,
+            )
             .where(
+                OfficialNotification.approval_status == "APPROVED",
                 or_(
                     Exam.name.ilike(search_term),
                     Exam.description.ilike(search_term),
-                )
+                ),
             )
+            .options(selectinload(Exam.body))
+            .distinct()
             .order_by(Exam.name.asc())
         )
 
