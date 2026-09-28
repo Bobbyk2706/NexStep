@@ -109,9 +109,9 @@ def analyze_semantic_changes(
 
     The analyzer is intentionally injected so that:
 
-    - unit tests can mock Gemini
+    - unit tests can mock the analyzer
     - the service does not depend on a particular
-      Gemini client implementation
+      AI client implementation
     - production AI infrastructure can be changed
       independently of this service
     """

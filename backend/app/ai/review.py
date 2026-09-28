@@ -13,8 +13,8 @@ from app.ai.aggregated_extraction_result import (
 from app.ai.chunk_aggregator import (
     aggregate_chunk_extractions,
 )
-from app.ai.chunk_extractor import (
-    extract_chunk_information,
+from app.ai.parallel_chunk_extraction import (
+    extract_chunks_in_parallel,
 )
 from app.ai.complete_extraction_normalizer import (
     normalize_complete_extraction,
@@ -439,7 +439,7 @@ def retry_extraction(
                 ↓
         lossless chunking
                 ↓
-        Gemini per chunk
+        AI provider per chunk
                 ↓
         conservative aggregation
                 ↓
@@ -580,16 +580,16 @@ def retry_extraction(
     # PHASE 4 — AI EXTRACTION
     # ========================================================
 
-    chunk_results = []
-
-    for chunk in chunks:
-
-        result = extract_chunk_information(
-            chunk,
+    try:
+        chunk_results = extract_chunks_in_parallel(
+            chunks,
             admin_feedback=feedback,
         )
 
-        chunk_results.append(result)
+    except Exception as error:
+        raise ValueError(
+            f"AI extraction failed on one or more chunks: {error}"
+        ) from error
 
     if not chunk_results:
         raise ValueError(

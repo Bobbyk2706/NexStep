@@ -1,36 +1,18 @@
 from __future__ import annotations
 
 import json
-import os
 
-from dotenv import load_dotenv
-from groq import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    Groq,
-    RateLimitError,
-)
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
-
-load_dotenv()
-
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY is not configured."
-    )
-
-
-client = Groq(
-    api_key=GROQ_API_KEY,
+from app.ai.provider_manager import (
+    AIProviderManager,
+    AllAIProvidersFailedError,
 )
 
 
-MODEL_NAME = "openai/gpt-oss-120b"
+# ============================================================
+# RESULT MODEL
+# ============================================================
 
 
 class SourceVerificationResult(BaseModel):
@@ -39,11 +21,22 @@ class SourceVerificationResult(BaseModel):
     relevant: bool
 
 
+# ============================================================
+# PROVIDER MANAGER
+# ============================================================
+
+_provider_manager = AIProviderManager()
+
+
+# ============================================================
+# PROMPT
+# ============================================================
+
+
 def _build_prompt(
     exam_name: str,
     sources: list[dict],
 ) -> str:
-
     source_information = []
 
     for source in sources:
@@ -90,92 +83,38 @@ Rules:
    relevant = false
 
 7. Return JSON only.
-
 """
 
 
-def _verify_once(
-    exam_name: str,
-    sources: list[dict],
-) -> SourceVerificationResult:
-
-    prompt = _build_prompt(
-        exam_name=exam_name,
-        sources=sources,
-    )
-
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict source verification "
-                    "system. You may only select URLs that "
-                    "appear in the supplied candidate list."
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        temperature=0,
-        max_tokens=512,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "source_verification",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "selected_url": {
-                            "type": "string",
-                        },
-                        "source_type": {
-                            "type": "string",
-                        },
-                        "relevant": {
-                            "type": "boolean",
-                        },
-                    },
-                    "required": [
-                        "selected_url",
-                        "source_type",
-                        "relevant",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-        },
-    )
-
-    content = response.choices[0].message.content
-
-    if not content:
-        raise RuntimeError(
-            "Groq returned an empty source-verification response."
-        )
-
-    try:
-        return SourceVerificationResult.model_validate(
-            json.loads(content)
-        )
-    except (
-        json.JSONDecodeError,
-        ValidationError,
-    ) as exc:
-        raise RuntimeError(
-            "Groq returned source-verification data that "
-            "failed validation."
-        ) from exc
+# ============================================================
+# SOURCE VERIFICATION
+# ============================================================
 
 
 def verify_exam_source(
     exam_name: str,
     sources: list[dict],
 ) -> SourceVerificationResult:
+    """
+    Select the most relevant official source for an exam.
+
+    The provider chain is:
+
+        Groq → OpenRouter → Local Ollama
+
+    A provider response is accepted only if:
+
+        1. It is valid SourceVerificationResult JSON.
+        2. selected_url is empty OR exactly matches one of the
+           supplied candidate URLs.
+
+    If a provider violates the URL constraint, the next provider
+    is attempted.
+    """
+
+    # ========================================================
+    # EMPTY SOURCE LIST
+    # ========================================================
 
     if not sources:
         return SourceVerificationResult(
@@ -184,23 +123,9 @@ def verify_exam_source(
             relevant=False,
         )
 
-    try:
-        result = _verify_once(
-            exam_name=exam_name,
-            sources=sources,
-        )
-
-    except RateLimitError:
-        raise
-
-    except (
-        APIConnectionError,
-        APITimeoutError,
-    ):
-        raise
-
-    except APIStatusError:
-        raise
+    # ========================================================
+    # CANDIDATE URL SET
+    # ========================================================
 
     candidate_urls = {
         source.get("url")
@@ -208,18 +133,123 @@ def verify_exam_source(
         if source.get("url")
     }
 
-    if result.selected_url:
+    # ========================================================
+    # PROMPT
+    # ========================================================
+
+    prompt = _build_prompt(
+        exam_name=exam_name,
+        sources=sources,
+    )
+
+    # ========================================================
+    # RESPONSE SCHEMA
+    # ========================================================
+
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "selected_url": {
+                "type": "string",
+            },
+            "source_type": {
+                "type": "string",
+            },
+            "relevant": {
+                "type": "boolean",
+            },
+        },
+        "required": [
+            "selected_url",
+            "source_type",
+            "relevant",
+        ],
+        "additionalProperties": False,
+    }
+
+    # ========================================================
+    # VALIDATOR
+    # ========================================================
+
+    def validate_response(
+        content: str,
+    ) -> SourceVerificationResult:
+        """
+        Validate both the JSON structure and the critical
+        candidate-URL safety invariant.
+        """
+
+        result = SourceVerificationResult.model_validate_json(
+            content
+        )
+
+        # ----------------------------------------------------
+        # NO SOURCE SELECTED
+        # ----------------------------------------------------
+
+        if not result.selected_url:
+            return SourceVerificationResult(
+                selected_url="",
+                source_type="NONE",
+                relevant=False,
+            )
+
+        # ----------------------------------------------------
+        # URL MUST COME FROM CANDIDATE LIST
+        # ----------------------------------------------------
+
         if result.selected_url not in candidate_urls:
-            raise RuntimeError(
+            raise ValueError(
                 "Source verification returned a URL that was "
                 "not present in the candidate source list."
             )
 
-    else:
-        result = SourceVerificationResult(
-            selected_url="",
-            source_type="NONE",
-            relevant=False,
+        return result
+
+    # ========================================================
+    # PROVIDER CHAIN
+    # ========================================================
+
+    try:
+        result = _provider_manager.generate(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict source verification "
+                        "system. You may only select URLs that "
+                        "appear in the supplied candidate list."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            response_schema=response_schema,
+            validator=validate_response,
+            temperature=0.0,
+            max_tokens=512,
+        )
+
+    except AllAIProvidersFailedError as exc:
+        raise RuntimeError(
+            "Source verification failed because all configured "
+            "AI providers failed or returned invalid source "
+            "verification data."
+        ) from exc
+
+    # ========================================================
+    # SAFETY CHECK
+    # ========================================================
+
+    if not isinstance(
+        result,
+        SourceVerificationResult,
+    ):
+        raise RuntimeError(
+            "Source verification returned an unexpected "
+            "result type."
         )
 
     return result

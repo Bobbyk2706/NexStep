@@ -2,13 +2,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.routers.admin_discovery import (
+    router as admin_discovery_router,
+)
 from app.routers.admin_review import router as admin_review_router
 from app.routers.auth_router import router as auth_router
+from app.routers.chatbot_router import router as chatbot_router
 from app.routers.eligibility_router import router as eligibility_router
 from app.routers.exam_router import router as exam_router
 from app.routers.profile_router import router as profile_router
 from app.routers.tracked_exam_router import router as tracked_exam_router
-
 
 app = FastAPI(title="NexStep API")
 
@@ -36,6 +39,11 @@ app.include_router(
 )
 
 app.include_router(
+    chatbot_router,
+    prefix="/api",
+)
+
+app.include_router(
     profile_router,
     prefix="/api",
 )
@@ -53,7 +61,7 @@ app.include_router(
     exam_router,
     prefix="/api",
 )
-
+app.include_router(admin_discovery_router)
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(

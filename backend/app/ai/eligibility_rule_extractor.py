@@ -1,46 +1,43 @@
 from __future__ import annotations
 
-import json
-import os
 from copy import deepcopy
 
-from dotenv import load_dotenv
-from groq import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    Groq,
-    RateLimitError,
-)
-from pydantic import ValidationError
-
 from app.ai.eligibility_schemas import EligibilityRulesData
-
-
-load_dotenv()
-
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    raise RuntimeError(
-        "GROQ_API_KEY is not configured."
-    )
-
-
-client = Groq(
-    api_key=GROQ_API_KEY,
+from app.ai.provider_manager import (
+    AIProviderManager,
+    AllAIProvidersFailedError,
 )
 
 
-MODEL_NAME = "openai/gpt-oss-120b"
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
 # Groq currently has a very small TPM allowance for this model.
 # Keep the request comfortably below the limit because token
 # consumption depends on the actual text density.
 CHUNK_SIZE = 16000
 
-MAX_RETRIES = 2
+# Number of task-level attempts.
+#
+# Each attempt itself goes through the complete provider chain:
+#
+#     Groq → OpenRouter → Local
+#
+# The provider classes handle their own infrastructure retries.
+MAX_ATTEMPTS = 2
+
+
+# ============================================================
+# PROVIDER MANAGER
+# ============================================================
+
+_provider_manager = AIProviderManager()
+
+
+# ============================================================
+# TEXT CHUNKING
+# ============================================================
 
 
 def _chunk_text(
@@ -121,6 +118,11 @@ def _chunk_text(
     return chunks
 
 
+# ============================================================
+# PROMPT
+# ============================================================
+
+
 def _make_prompt(text: str) -> str:
     return f"""
 Extract the eligibility requirements from the following
@@ -198,18 +200,129 @@ OFFICIAL DOCUMENT CHUNK:
 """
 
 
+# ============================================================
+# STRICT RETRY PROMPT
+# ============================================================
+
+
+def _make_retry_prompt(text: str) -> str:
+    return f"""
+The previous eligibility-rule extraction response was invalid
+or could not be validated against the required schema.
+
+Retry the extraction for the SAME official document chunk.
+
+Return ONLY valid JSON matching the supplied response schema.
+
+IMPORTANT:
+
+1. Extract only eligibility requirements explicitly supported
+   by the supplied text.
+
+2. Do not use outside knowledge.
+
+3. Do not invent or assume requirements.
+
+4. Use only these attributes:
+
+   CGPA
+   Percentage
+   Specialization
+   Date of Birth
+   Nationality
+   State
+   Educational Qualification
+   Work Experience
+
+5. Use only these operators:
+
+   =
+   !=
+   >
+   >=
+   <
+   <=
+
+6. Do NOT use IN.
+
+7. Multiple acceptable values must be represented with an
+   OR child group.
+
+8. Requirements that must all be satisfied must be represented
+   with an AND group.
+
+9. Preserve explicitly stated nested logical relationships.
+
+10. Do not include application instructions, exam dates,
+    syllabus, fees, document submission instructions,
+    or unrelated information.
+
+11. If this chunk contains no eligibility requirements,
+    return an empty rule tree.
+
+12. Do not infer requirements from information that is not
+    present in this chunk.
+
+13. Return ONLY the structured JSON response.
+
+OFFICIAL DOCUMENT CHUNK:
+
+{text}
+"""
+
+
+# ============================================================
+# SINGLE-CHUNK EXTRACTION
+# ============================================================
+
+
 def _extract_single_chunk(
     text: str,
 ) -> EligibilityRulesData:
+    """
+    Extract eligibility rules from one bounded document chunk.
+
+    Each task-level attempt uses the complete provider chain:
+
+        Groq → OpenRouter → Local
+
+    Provider-specific API retries are handled by the provider
+    implementations.
+
+    Pydantic validation happens here so the provider manager can
+    reject malformed structured output and move to the next
+    provider.
+    """
+
+    response_schema = (
+        EligibilityRulesData.model_json_schema()
+    )
+
+    def validate_response(
+        content: str,
+    ) -> EligibilityRulesData:
+        """
+        Validate the raw provider response against the
+        application's authoritative Pydantic model.
+        """
+
+        return EligibilityRulesData.model_validate_json(
+            content
+        )
 
     prompt = _make_prompt(text)
 
     last_error: Exception | None = None
 
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(MAX_ATTEMPTS):
+        current_prompt = (
+            prompt
+            if attempt == 0
+            else _make_retry_prompt(text)
+        )
+
         try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
+            result = _provider_manager.generate(
                 messages=[
                     {
                         "role": "system",
@@ -223,67 +336,43 @@ def _extract_single_chunk(
                     },
                     {
                         "role": "user",
-                        "content": prompt,
+                        "content": current_prompt,
                     },
                 ],
-                temperature=0,
+                response_schema=response_schema,
+                validator=validate_response,
+                temperature=0.0,
                 max_tokens=4096,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "eligibility_rules",
-                        "strict": False,
-                        "schema": (
-                            EligibilityRulesData
-                            .model_json_schema()
-                        ),
-                    },
-                },
             )
 
-            content = response.choices[0].message.content
-
-            if not content:
+            if not isinstance(
+                result,
+                EligibilityRulesData,
+            ):
                 raise RuntimeError(
-                    "Groq returned an empty response."
+                    "AI provider manager returned an unexpected "
+                    "eligibility-rule extraction result."
                 )
 
-            try:
-                return EligibilityRulesData.model_validate(
-                    json.loads(content)
-                )
-            except (
-                json.JSONDecodeError,
-                ValidationError,
-            ) as exc:
-                raise RuntimeError(
-                    "Groq returned eligibility rules that "
-                    "failed validation."
-                ) from exc
+            return result
 
-        except RateLimitError as exc:
+        except AllAIProvidersFailedError as exc:
             last_error = exc
 
-        except (
-            APIConnectionError,
-            APITimeoutError,
-        ) as exc:
-            last_error = exc
-
-        except APIStatusError as exc:
-            if exc.status_code == 413:
-                raise RuntimeError(
-                    "Eligibility-rule extraction chunk is "
-                    "too large for the configured Groq TPM "
-                    "limit. Reduce CHUNK_SIZE."
-                ) from exc
-
-            raise
+            # If this was the final task-level attempt,
+            # preserve the failure context.
+            if attempt == MAX_ATTEMPTS - 1:
+                break
 
     raise RuntimeError(
-        "Groq eligibility-rule extraction failed after "
-        f"{MAX_RETRIES + 1} attempts."
+        "Eligibility-rule extraction failed after "
+        f"{MAX_ATTEMPTS} provider-chain attempts."
     ) from last_error
+
+
+# ============================================================
+# RESULT MERGING
+# ============================================================
 
 
 def _merge_results(
@@ -334,6 +423,11 @@ def _merge_results(
     return merged
 
 
+# ============================================================
+# PUBLIC EXTRACTION FUNCTION
+# ============================================================
+
+
 def extract_eligibility_rules(
     text: str,
 ) -> EligibilityRulesData:
@@ -341,7 +435,10 @@ def extract_eligibility_rules(
     Extract eligibility rules from a document of arbitrary size.
 
     Large documents are split into bounded chunks so that a
-    single request cannot exceed the Groq TPM limit.
+    single request cannot exceed the configured chunk size.
+
+    Each chunk is processed independently through the AI
+    provider fallback chain.
     """
 
     chunks = _chunk_text(text)
@@ -356,6 +453,7 @@ def extract_eligibility_rules(
     for index, chunk in enumerate(chunks, start=1):
         try:
             result = _extract_single_chunk(chunk)
+
         except Exception as exc:
             raise RuntimeError(
                 "Eligibility-rule extraction failed for "

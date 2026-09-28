@@ -36,7 +36,7 @@ class ProfileIn(BaseModel):
 
 class ProfileOut(BaseModel):
     name: str
-    dob: str | None = None
+    dob: str 
     nationality: str | None = None
     state: str | None = None
     college: str | None = None
