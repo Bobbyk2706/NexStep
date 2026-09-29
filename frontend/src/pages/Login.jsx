@@ -151,8 +151,7 @@ export default function Login() {
         )}
 
         <p className="mt-6 text-center text-xs text-slate-400">
-          Mock authentication — any 6+ character password works for either role. Student and admin
-          sessions are stored separately, so choosing one never affects the other.
+          Student and admin sessions are stored separately, so choosing one never affects the other.
         </p>
       </div>
     </div>

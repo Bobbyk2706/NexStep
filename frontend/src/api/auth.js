@@ -1,46 +1,120 @@
-import { mockDelay, setToken } from "./client";
 
-// Mocked auth. Replace the bodies below with:
-//   return request("/auth/login", { method: "POST", body: { email, password } });
-//   return request("/auth/signup", { method: "POST", body: { name, email, password } });
-// Vivek's API is expected to return { token, user, hasProfile } — this mock
-// mirrors that shape so nothing downstream (AuthContext, routes) needs to
-// change when the real endpoint is wired in.
+import { request, setToken, getToken } from "./client";
 
+/**
+ * Student login.
+ *
+ * Backend:
+ * POST /auth/login
+ *
+ * Response:
+ * {
+ *   token: "...",
+ *   user: {
+ *     name: "...",
+ *     email: "..."
+ *   },
+ *   hasProfile: true | false
+ * }
+ */
 export async function login({ email, password }) {
-  await mockDelay();
   if (!email || !password) {
     throw new Error("Enter your email and password.");
   }
-  if (password.length < 6) {
-    throw new Error("That email/password combination doesn't match our records.");
+
+  const data = await request("/auth/login", {
+    method: "POST",
+    body: {
+      email,
+      password,
+    },
+    auth: false,
+  });
+
+  if (!data?.token) {
+    throw new Error("Login succeeded but no authentication token was returned.");
   }
-  const token = `mock.${btoa(email)}.token`;
-  setToken(token);
-  return {
-    token,
-    user: { name: email.split("@")[0], email },
-    hasProfile: true,
-  };
+
+  setToken(data.token);
+
+  return data;
 }
 
+/**
+ * Student signup.
+ *
+ * Backend:
+ * POST /auth/signup
+ *
+ * Response:
+ * {
+ *   token: "...",
+ *   user: {
+ *     name: "...",
+ *     email: "..."
+ *   },
+ *   hasProfile: false
+ * }
+ */
 export async function signup({ name, email, password }) {
-  await mockDelay();
   if (!name || !email || !password) {
     throw new Error("Fill in your name, email, and password.");
   }
+
   if (password.length < 6) {
     throw new Error("Password must be at least 6 characters.");
   }
-  const token = `mock.${btoa(email)}.token`;
-  setToken(token);
-  return {
-    token,
-    user: { name, email },
-    hasProfile: false,
-  };
+
+  const data = await request("/auth/signup", {
+    method: "POST",
+    body: {
+      name,
+      email,
+      password,
+    },
+    auth: false,
+  });
+
+  if (!data?.token) {
+    throw new Error("Signup succeeded but no authentication token was returned.");
+  }
+
+  setToken(data.token);
+
+  return data;
 }
 
-export function logout() {
-  setToken(null);
+/**
+ * Get the currently authenticated user.
+ *
+ * Backend:
+ * GET /auth/me
+ */
+export async function getCurrentUser() {
+  if (!getToken()) {
+    return null;
+  }
+
+  return request("/auth/me");
 }
+
+/**
+ * Logout.
+ *
+ * Backend:
+ * POST /auth/logout
+ *
+ * The backend invalidates the user's token version.
+ */
+export async function logout() {
+  try {
+    if (getToken()) {
+      await request("/auth/logout", {
+        method: "POST",
+      });
+    }
+  } finally {
+    setToken(null);
+  }
+}
+

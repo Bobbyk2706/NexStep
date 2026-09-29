@@ -13,6 +13,7 @@ function Field({ label, value }) {
 
 export default function EligibilityInfoCard({ info }) {
   if (!info) return null;
+
   return (
     <Card>
       <h2 className="mb-4 font-mono text-xs uppercase tracking-wide text-slate-400">Eligibility Information</h2>

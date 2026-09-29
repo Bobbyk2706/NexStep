@@ -211,7 +211,11 @@ class GroqProvider(AIProvider):
 
             except RateLimitError as exc:
                 last_error = exc
-                break
+
+                if attempt >= self.max_retries:
+                    break
+
+                time.sleep(10)
 
             except APITimeoutError as exc:
                 last_error = exc

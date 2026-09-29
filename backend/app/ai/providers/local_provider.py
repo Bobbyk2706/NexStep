@@ -29,7 +29,7 @@ DEFAULT_HOST = os.getenv(
 DEFAULT_TIMEOUT = float(
     os.getenv(
         "NEXSTEP_LOCAL_AI_TIMEOUT_SECONDS",
-        "90",
+        "540",
     )
 )
 

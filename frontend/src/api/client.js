@@ -1,17 +1,10 @@
-// Central API client.
+// Central API client used by the student and admin apps.
 //
-// createClient() builds a fetch wrapper with 401 handling, so the student
-// app and the admin app can share the same logic while keeping separate
-// tokens (an admin session must never double as a student session).
-//
-// When a request that carried a token comes back 401, the session is no
-// longer valid. The client (optionally) tries a token refresh once, retries,
-// and if it is still 401 calls onUnauthorized() so the owning auth context
-// can clear its state — RequireAuth / RequireAdminAuth then redirect to
-// /login. A 401 on a request that sent no token (e.g. a wrong password on
-// login) is just a failed attempt and does NOT count as an expired session.
+// `baseUrl` is configurable so the student API (/api) and the admin
+// extraction routes (mounted at /admin) can share the same request logic.
 
-export const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
+export const BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
 
 const TOKEN_KEY = "nexstep_token";
 
@@ -20,8 +13,11 @@ export function getToken() {
 }
 
 export function setToken(token) {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else localStorage.removeItem(TOKEN_KEY);
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token);
+  } else {
+    localStorage.removeItem(TOKEN_KEY);
+  }
 }
 
 export class ApiError extends Error {
@@ -32,51 +28,101 @@ export class ApiError extends Error {
   }
 }
 
-export function createClient({ getToken, refresh, onUnauthorized }) {
+export function createClient({
+  getToken: readToken,
+  refresh,
+  onUnauthorized,
+  baseUrl = BASE_URL,
+}) {
   async function send(path, { method, body, headers }) {
-    const token = getToken();
-    const res = await fetch(`${BASE_URL}${path}`, {
+    const token = readToken();
+
+    const res = await fetch(`${baseUrl}${path}`, {
       method,
       headers: {
         "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(token
+          ? {
+              Authorization: `Bearer ${token}`,
+            }
+          : {}),
         ...headers,
       },
-      body: body ? JSON.stringify(body) : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    return { res, sentToken: Boolean(token) };
+
+    return {
+      res,
+      sentToken: Boolean(token),
+    };
   }
 
-  // `auth: false` opts a call out of session-expiry handling (login, logout).
-  return async function request(path, { method = "GET", body, headers = {}, auth = true } = {}) {
-    const opts = { method, body, headers };
-    let { res, sentToken } = await send(path, opts);
+  return async function request(
+    path,
+    {
+      method = "GET",
+      body,
+      headers = {},
+      auth = true,
+    } = {}
+  ) {
+    const options = {
+      method,
+      body,
+      headers,
+    };
+
+    let { res, sentToken } = await send(path, options);
 
     if (res.status === 401 && auth && sentToken) {
-      if (refresh && (await refresh())) {
-        ({ res } = await send(path, opts));
+      let refreshed = false;
+
+      if (refresh) {
+        try {
+          refreshed = await refresh();
+        } catch {
+          refreshed = false;
+        }
       }
-      if (res.status === 401) onUnauthorized?.();
+
+      if (refreshed) {
+        ({ res } = await send(path, options));
+      }
+
+      if (res.status === 401) {
+        onUnauthorized?.();
+      }
     }
 
     if (!res.ok) {
       let message = `Request failed (${res.status})`;
+
       try {
         const data = await res.json();
-        message = data.message || data.error || message;
+        message = data?.detail || data?.message || data?.error || message;
       } catch {
-        // response wasn't JSON — keep the generic message
+        // Keep the generic message for non-JSON responses.
       }
+
       throw new ApiError(message, res.status);
     }
 
-    if (res.status === 204) return null;
+    if (res.status === 204) {
+      return null;
+    }
+
+    const contentType = res.headers.get("content-type") || "";
+
+    if (!contentType.includes("application/json")) {
+      return null;
+    }
+
     return res.json();
   };
 }
 
-// Student session: subscribe to be told when the token stops being valid.
 const expiredListeners = new Set();
+
 export function onSessionExpired(fn) {
   expiredListeners.add(fn);
   return () => expiredListeners.delete(fn);
@@ -86,10 +132,13 @@ export const request = createClient({
   getToken,
   onUnauthorized() {
     setToken(null);
-    expiredListeners.forEach((fn) => fn());
+
+    expiredListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+        // One listener must not prevent the others from running.
+      }
+    });
   },
 });
-
-// Small helper so mock modules can simulate network latency without
-// every file re-implementing a sleep function.
-export const mockDelay = (ms = 350) => new Promise((resolve) => setTimeout(resolve, ms));

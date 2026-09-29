@@ -16,9 +16,12 @@ function StatCard({ label, value, accent }) {
 
 export default function AdminDashboard() {
   const [stats, setStats] = useState(null);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    getDashboardStats().then(setStats);
+    getDashboardStats()
+      .then(setStats)
+      .catch((err) => setError(err.message || "Could not load dashboard data."));
   }, []);
 
   return (
@@ -28,9 +31,11 @@ export default function AdminDashboard() {
         <p className="mt-1.5 text-slate-600">Overview of the exam ingestion and extraction review pipeline.</p>
       </div>
 
+      {error && <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
+
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <StatCard label="Pending Reviews" value={stats?.pendingReviews ?? "—"} accent="text-amber-600" />
-        <StatCard label="Approved Exams" value={stats?.approvedExams ?? "—"} accent="text-signal-600" />
+        <StatCard label="Approved Extractions" value={stats?.approvedExams ?? "—"} accent="text-signal-600" />
         <StatCard label="Rejected Extractions" value={stats?.rejectedExtractions ?? "—"} accent="text-red-600" />
         <StatCard label="Failed Extractions" value={stats?.failedExtractions ?? "—"} accent="text-red-700" />
       </div>

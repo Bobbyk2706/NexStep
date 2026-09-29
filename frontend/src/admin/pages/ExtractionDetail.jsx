@@ -6,7 +6,6 @@ import Button from "../../components/ui/Button";
 import { TextareaField } from "../../components/ui/Field";
 import StatusBadge from "../components/StatusBadge";
 import Modal from "../components/Modal";
-import ProcessingChecklist from "../components/ProcessingChecklist";
 import SourceInfoCard from "../components/SourceInfoCard";
 import ExamInfoCard from "../components/ExamInfoCard";
 import EligibilityInfoCard from "../components/EligibilityInfoCard";
@@ -16,12 +15,10 @@ import ConflictPanel from "../components/ConflictPanel";
 import ValidationPanel from "../components/ValidationPanel";
 import {
   getExtractionById,
-  advanceProcessing,
   approveExtraction,
   rejectExtraction,
   retryExtraction,
 } from "../api/adminExtractions";
-import { isProcessingStatus } from "../api/adminData";
 import { formatDate } from "../../utils/date";
 
 export default function ExtractionDetail() {
@@ -33,38 +30,34 @@ export default function ExtractionDetail() {
   const [rejectFeedback, setRejectFeedback] = useState("");
   const [rejectError, setRejectError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
     setExtraction(undefined);
-    getExtractionById(id).then((data) => {
-      if (active) setExtraction(data);
-    });
+    setError("");
+
+    getExtractionById(id)
+      .then((data) => {
+        if (active) setExtraction(data);
+      })
+      .catch((err) => {
+        if (active) setError(err.message || "Could not load extraction.");
+      });
+
     return () => {
       active = false;
     };
   }, [id]);
 
-  // Poll forward through processing stages, like the backend would report
-  // on each status check.
-  useEffect(() => {
-    if (!extraction || !isProcessingStatus(extraction.status)) return;
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      const updated = await advanceProcessing(extraction.id);
-      if (!cancelled) setExtraction(updated);
-    }, 900);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [extraction]);
-
   async function handleApprove() {
     setBusy(true);
     try {
       await approveExtraction(id);
-      navigate(`/admin/exams/${extraction.examId}`);
+      navigate(extraction.examId ? `/admin/exams/${extraction.examId}` : "/admin/extractions");
+    } catch (err) {
+      setError(err.message || "Failed to approve extraction.");
+      setShowApprove(false);
     } finally {
       setBusy(false);
     }
@@ -72,13 +65,16 @@ export default function ExtractionDetail() {
 
   async function handleReject() {
     if (!rejectFeedback.trim()) {
-      setRejectError("Feedback is required to reject an extraction.");
+      setRejectError("Feedback is required to reject the extraction.");
       return;
     }
+
     setBusy(true);
     try {
       await rejectExtraction(id, rejectFeedback);
       navigate("/admin/extractions");
+    } catch (err) {
+      setRejectError(err.message || "Failed to reject extraction.");
     } finally {
       setBusy(false);
     }
@@ -89,6 +85,8 @@ export default function ExtractionDetail() {
     try {
       const retried = await retryExtraction(id);
       navigate(`/admin/extractions/${retried.id}`);
+    } catch (err) {
+      setError(err.message || "Failed to retry extraction.");
     } finally {
       setBusy(false);
     }
@@ -97,6 +95,7 @@ export default function ExtractionDetail() {
   if (extraction === undefined) {
     return <p className="text-sm text-slate-400">Loading extraction...</p>;
   }
+
   if (extraction === null) {
     return (
       <Card>
@@ -117,30 +116,17 @@ export default function ExtractionDetail() {
   const header = (
     <div className="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">{extraction.examName}</h1>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          {extraction.examName}
+        </h1>
         <p className="mt-1 text-slate-500">
-          Extraction #{extraction.id.replace("ext-", "")} · Version {extraction.version}
+          Extraction #{String(extraction.id)} · Version {extraction.version}
         </p>
       </div>
       <StatusBadge status={extraction.status} />
     </div>
   );
 
-  // --- Processing ---
-  if (isProcessingStatus(extraction.status)) {
-    return (
-      <div className="flex flex-col gap-6">
-        {backLink}
-        {header}
-        <Card className="max-w-lg">
-          <h2 className="mb-4 font-display text-base font-semibold text-ink">AI Processing</h2>
-          <ProcessingChecklist currentStatus={extraction.status} />
-        </Card>
-      </div>
-    );
-  }
-
-  // --- Failed ---
   if (extraction.status === "FAILED") {
     return (
       <div className="flex flex-col gap-6">
@@ -151,20 +137,7 @@ export default function ExtractionDetail() {
             <AlertOctagon size={18} />
             <h2 className="font-display text-base font-semibold">Extraction Failed</h2>
           </div>
-          <div className="mt-4 flex flex-col gap-3 text-sm">
-            <div>
-              <p className="text-xs text-red-500">Stage</p>
-              <p className="font-medium text-ink">{extraction.failedStage}</p>
-            </div>
-            <div>
-              <p className="text-xs text-red-500">Error</p>
-              <p className="text-ink">{extraction.failedError}</p>
-            </div>
-            <div>
-              <p className="text-xs text-red-500">Time</p>
-              <p className="text-ink">{formatDate(extraction.failedAt)}</p>
-            </div>
-          </div>
+          <p className="mt-3 text-sm text-ink">{extraction.changeDetails || "The backend reported that this extraction failed."}</p>
           <Button onClick={handleRetry} loading={busy} className="mt-5">
             <RotateCcw size={15} /> Retry
           </Button>
@@ -173,7 +146,6 @@ export default function ExtractionDetail() {
     );
   }
 
-  // --- Pending review / Rejected / Approved share the same review layout ---
   const isPending = extraction.status === "PENDING_REVIEW";
   const isRejected = extraction.status === "REJECTED";
 
@@ -181,6 +153,12 @@ export default function ExtractionDetail() {
     <div className="flex flex-col gap-6 pb-10">
       {backLink}
       {header}
+
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       {isRejected && extraction.rejectFeedback && (
         <div className="rounded-2xl border border-red-200 bg-red-50 p-5">
@@ -203,14 +181,20 @@ export default function ExtractionDetail() {
 
       <EvidencePanel evidence={extraction.evidence} sourceUrl={extraction.source?.url} />
 
+      {extraction.aiSummary && (
+        <Card>
+          <h2 className="mb-2 font-mono text-xs uppercase tracking-wide text-slate-400">AI Summary</h2>
+          <p className="text-sm leading-6 text-slate-600">{extraction.aiSummary}</p>
+        </Card>
+      )}
+
       {isRejected && (
         <Card className="border-indigo-200 bg-indigo-50/50">
           <h2 className="mb-2 font-display text-base font-semibold text-ink">AI Retry</h2>
           <p className="mb-1 text-xs uppercase tracking-wide text-slate-400">Previous administrator feedback</p>
           <p className="mb-4 text-sm text-slate-600">"{extraction.rejectFeedback}"</p>
           <p className="mb-4 text-sm text-slate-500">
-            The AI will re-examine the original official document using this feedback and produce a new
-            extraction version — the current one stays in history unchanged.
+            The backend will re-run extraction against the original document and create a new pending extraction.
           </p>
           <Button onClick={handleRetry} loading={busy}>
             <RotateCcw size={15} /> Retry Extraction

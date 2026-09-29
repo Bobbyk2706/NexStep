@@ -1,7 +1,6 @@
 import { request, ApiError } from "./client";
 
-// Real backend call replacing the old findAnswer() mock in
-// data/assistantKnowledge.js. Backend: POST /api/assistant/chat
+// Backend: POST /api/assistant/chat
 // (app/routers/chatbot_router.py -> app/services/chatbot_service.py).
 //
 // `history` is the running conversation as [{role, content}], oldest
