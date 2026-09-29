@@ -18,6 +18,10 @@ from sqlalchemy import select
 from app.ai.aggregated_extraction_result import (
     AggregatedExtractionResult,
 )
+from app.ai.document_models import (
+    DocumentPage,
+    ParsedDocument,
+)
 from app.ai.chunk_aggregator import (
     aggregate_chunk_extractions,
 )
@@ -1845,12 +1849,29 @@ def _find_official_pdf(
 # ============================================================
 
 
-def _extract_pdf_pages(
+def _parse_pdf_document(
     pdf_content: bytes,
-) -> list[str]:
+    *,
+    source_url: str,
+    document_hash: str,
+    file_path: str | None = None,
+) -> ParsedDocument:
     """
-    Extract text page-by-page so the existing lossless chunking
-    pipeline can preserve page provenance.
+    Parse the official PDF while preserving physical page boundaries.
+
+    The parser deliberately does not perform AI extraction.
+
+    Its only responsibilities are:
+
+        PDF
+          ↓
+        physical pages
+          ↓
+        ParsedDocument
+
+    Keeping parsing separate from AI extraction allows later stages
+    to reason about sections and evidence without losing page
+    provenance.
     """
 
     if not pdf_content:
@@ -1859,7 +1880,7 @@ def _extract_pdf_pages(
         )
 
     _log(
-        "OPENING PDF"
+        "OPENING PDF FOR PAGE-AWARE PARSING"
     )
 
     try:
@@ -1869,17 +1890,36 @@ def _extract_pdf_pages(
         )
 
     except Exception as error:
-
         raise ExamDiscoveryError(
             "Unable to open the official PDF."
         ) from error
 
-    try:
+    pages: list[DocumentPage] = []
 
-        pages = [
-            page.get_text()
-            for page in document
-        ]
+    try:
+        for index, page in enumerate(document):
+            page_number = index + 1
+
+            try:
+                text = page.get_text(
+                    "text",
+                ) or ""
+
+            except Exception as error:
+                _log(
+                    f"PDF PAGE TEXT EXTRACTION FAILED: "
+                    f"page={page_number} "
+                    f"error={type(error).__name__}: {error}"
+                )
+
+                text = ""
+
+            pages.append(
+                DocumentPage(
+                    page_number=page_number,
+                    text=text,
+                )
+            )
 
     finally:
         document.close()
@@ -1889,20 +1929,37 @@ def _extract_pdf_pages(
             "The official PDF contains no pages."
         )
 
-    if not any(
-        page.strip()
+    non_empty_pages = [
+        page
         for page in pages
-    ):
+        if page.has_text
+    ]
+
+    if not non_empty_pages:
         raise ExamDiscoveryError(
             "The official PDF contains no extractable text."
         )
 
-    _log(
-        f"PDF TEXT EXTRACTION COMPLETE: "
-        f"{len(pages)} pages"
+    parsed_document = ParsedDocument(
+        source_url=source_url,
+        document_hash=document_hash,
+        file_path=file_path,
+        pages=pages,
+        metadata={
+            "parser": "PyMuPDF",
+            "page_count": len(pages),
+            "non_empty_page_count": len(non_empty_pages),
+        },
     )
 
-    return pages
+    _log(
+        "PDF PAGE-AWARE PARSING COMPLETE: "
+        f"{parsed_document.page_count} pages, "
+        f"{len(non_empty_pages)} non-empty pages, "
+        f"{parsed_document.character_count} characters"
+    )
+
+    return parsed_document
 
 
 # ============================================================
@@ -1912,6 +1969,10 @@ def _extract_pdf_pages(
 
 def _extract_and_validate_pdf(
     pdf_content: bytes,
+    *,
+    source_url: str,
+    document_hash: str,
+    file_path: str | None = None,
 ) -> AggregatedExtractionResult:
     """
     Run the existing production extraction pipeline:
@@ -1931,9 +1992,17 @@ def _extract_and_validate_pdf(
         validation
     """
 
-    pages = _extract_pdf_pages(
-        pdf_content
+    document = _parse_pdf_document(
+        pdf_content,
+        source_url=source_url,
+        document_hash=document_hash,
+        file_path=file_path,
     )
+
+    pages = [
+        page.text
+        for page in document.pages
+    ]
 
     chunks = chunk_document_pages(
         pages,
@@ -2406,7 +2475,10 @@ def _discover_exam_once(
     )
 
     extraction = _extract_and_validate_pdf(
-        pdf_content
+        pdf_content,
+        source_url=official_url,
+        document_hash=pdf.get("document_hash") or "",
+        file_path=str(pdf_path),
     )
 
     _log(

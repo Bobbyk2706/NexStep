@@ -34,6 +34,20 @@ def _parse_int(value: str | None) -> int | None:
         return None
 
 
+def _parse_float(value: str | None) -> float | None:
+    if not value:
+        return None
+
+    cleaned = value.strip().replace("%", "")
+    if not cleaned:
+        return None
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
 def _parse_score(value: str | None) -> tuple[float | None, float | None]:
     """Returns (cgpa, percentage) — the frontend's per-qualification
     'score' field is a single free-text box covering either."""
@@ -92,7 +106,7 @@ def get_profile(
         .first()
     )
     if current is None:
-        # No profile saved yet — matches the mock's `return null`.
+        # No profile saved yet.
         return None
 
     past_quals = (
@@ -158,8 +172,8 @@ def save_profile(
     current_student.nationality = payload.nationality
     current_student.state = payload.state
 
-    cgpa = float(payload.cgpa) if payload.cgpa else None
-    percentage = float(payload.percentage) if payload.percentage else None
+    cgpa = _parse_float(payload.cgpa)
+    percentage = _parse_float(payload.percentage)
 
     db.add(Education(
         student_id=current_student.student_id,

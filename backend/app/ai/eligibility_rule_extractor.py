@@ -16,7 +16,7 @@ from app.ai.provider_manager import (
 # Groq currently has a very small TPM allowance for this model.
 # Keep the request comfortably below the limit because token
 # consumption depends on the actual text density.
-CHUNK_SIZE = 16000
+CHUNK_SIZE = 10000
 
 # Number of task-level attempts.
 #

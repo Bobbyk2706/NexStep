@@ -43,7 +43,7 @@ def _build_prompt(
         source_information.append(
             {
                 "url": source.get("url"),
-                "text": source.get("text", "")[:3000],
+                "text": source.get("text", "")[:1000],
             }
         )
 
@@ -229,7 +229,7 @@ def verify_exam_source(
             response_schema=response_schema,
             validator=validate_response,
             temperature=0.0,
-            max_tokens=512,
+            max_tokens=1024,
         )
 
     except AllAIProvidersFailedError as exc:

@@ -11,6 +11,7 @@ from app.routers.chatbot_router import router as chatbot_router
 from app.routers.eligibility_router import router as eligibility_router
 from app.routers.exam_router import router as exam_router
 from app.routers.profile_router import router as profile_router
+from app.routers.notification_router import router as notification_router
 from app.routers.tracked_exam_router import router as tracked_exam_router
 
 app = FastAPI(title="NexStep API")
@@ -45,6 +46,11 @@ app.include_router(
 
 app.include_router(
     profile_router,
+    prefix="/api",
+)
+
+app.include_router(
+    notification_router,
     prefix="/api",
 )
 
