@@ -429,7 +429,7 @@ DOCUMENT CHUNK
 
         validation_failure_detected = any(
             attempt.error
-            and "Response validation failed:" in attempt.error
+            and attempt.error.startswith("Validation failed")
             for attempt in first_error.attempts
         )
 

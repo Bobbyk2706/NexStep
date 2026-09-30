@@ -154,13 +154,33 @@ export async function getExtractionById(id) {
     },
     evidence: (parsed?.evidence || []).map((item, index) => ({
       id: `${detail.extraction_id}-evidence-${index}`,
-      field: "Extracted evidence",
+      field: item.field || "Extracted evidence",
       chunkNumber: item.chunk_number,
       pageNumbers: item.page_numbers || [],
       sourceText: item.source_text,
+      verified: item.verified ?? null,
+      section: item.section || null,
     })),
-    conflicts: [],
-    validationIssues: [],
+    conflicts: (parsed?.conflicts || []).map((conflict) => ({
+      field: conflict.field,
+      chosen: conflict.chosen || null,
+      reason: conflict.reason || "",
+      options: (conflict.options || []).map((option) => ({
+        value: option.value,
+        source: [
+          option.source,
+          option.pages?.length ? `p. ${option.pages.join(", ")}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      })),
+    })),
+    validationIssues: (parsed?.issues || []).map((issue) => ({
+      severity: issue.severity || "warning",
+      message: issue.message,
+      field: issue.field || null,
+    })),
+    pipeline: parsed?.pipeline || null,
     rejectFeedback: status === "REJECTED" ? detail.change_details || "" : "",
     feedbackHistory: [],
     aiSummary: detail.ai_summary || null,

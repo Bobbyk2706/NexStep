@@ -16,6 +16,10 @@ class DocumentPage:
     page_number: int
     text: str
 
+    # Parser extras (all optional): superseded/struck-out text that
+    # was removed from `text`, scanned-page flag, table count, etc.
+    metadata: dict[str, Any] = field(default_factory=dict)
+
     @property
     def has_text(self) -> bool:
         return bool(self.text.strip())

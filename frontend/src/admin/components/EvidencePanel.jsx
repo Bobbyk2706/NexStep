@@ -6,8 +6,15 @@ function EvidenceItem({ item, sourceUrl }) {
   return (
     <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
       <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-        <span>Chunk <span className="font-mono text-ink">{item.chunkNumber}</span></span>
-        <span>Pages <span className="font-mono text-ink">{item.pageNumbers.join(", ")}</span></span>
+        <span>Ref <span className="font-mono text-ink">{item.chunkNumber || "—"}</span></span>
+        <span>Pages <span className="font-mono text-ink">{item.pageNumbers.join(", ") || "—"}</span></span>
+        {item.section && <span className="truncate">Section <span className="text-ink">{item.section}</span></span>}
+        {item.verified === true && (
+          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700">Found in document</span>
+        )}
+        {item.verified === false && (
+          <span className="rounded bg-red-50 px-1.5 py-0.5 font-medium text-red-700">Quote not found</span>
+        )}
       </div>
       <blockquote className="mt-2 border-l-2 border-indigo-200 pl-3 text-sm italic text-slate-600">
         "{item.sourceText}"
@@ -54,7 +61,7 @@ export default function EvidencePanel({ evidence = [], sourceUrl }) {
   return (
     <Card>
       <h2 className="mb-1 font-mono text-xs uppercase tracking-wide text-slate-400">Evidence / Provenance</h2>
-      <p className="mb-3 text-xs text-slate-400">Every extracted value traces back to a chunk, page, and the original document text.</p>
+      <p className="mb-3 text-xs text-slate-400">Every extracted value traces back to a page and the original document text.</p>
       <div className="flex flex-col">
         {Object.entries(byField).map(([field, items]) => (
           <FieldGroup key={field} field={field} items={items} sourceUrl={sourceUrl} />

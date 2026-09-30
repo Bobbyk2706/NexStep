@@ -13,6 +13,9 @@ from app.routers.exam_router import router as exam_router
 from app.routers.profile_router import router as profile_router
 from app.routers.notification_router import router as notification_router
 from app.routers.tracked_exam_router import router as tracked_exam_router
+from app.logging_config import setup_logging
+
+setup_logging()
 
 app = FastAPI(title="NexStep API")
 

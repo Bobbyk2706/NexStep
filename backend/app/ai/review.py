@@ -10,17 +10,11 @@ from sqlalchemy import select
 from app.ai.aggregated_extraction_result import (
     AggregatedExtractionResult,
 )
-from app.ai.chunk_aggregator import (
-    aggregate_chunk_extractions,
-)
-from app.ai.parallel_chunk_extraction import (
-    extract_chunks_in_parallel,
-)
-from app.ai.complete_extraction_normalizer import (
-    normalize_complete_extraction,
-)
-from app.ai.complete_extraction_validation import (
-    validate_complete_extraction,
+from app.ai.extraction.parsing import parse_text_pages
+from app.ai.extraction.pipeline import (
+    ensure_usable,
+    run_extraction,
+    summarize,
 )
 from app.ai.extraction_serialization import (
     deserialize_aggregated_extraction,
@@ -562,87 +556,46 @@ def retry_extraction(
     )
 
     # ========================================================
-    # PHASE 3 — LOSSLESS CHUNKING
+    # PHASE 3-7 — EXTRACTION (pipeline v2)
     # ========================================================
+    #
+    # The administrator's feedback steers retrieval (it widens the
+    # search for the topics it mentions) and is given to the model as
+    # guidance - never as evidence.
 
-    chunks = chunk_document_pages(
-        pages,
-        chunk_size=30000,
-    )
+    document_source: object = None
 
-    if not chunks:
-        raise ValueError(
-            "The original document produced no "
-            "extractable chunks."
+    if actual_pdf_path and Path(actual_pdf_path).is_file():
+        document_source = Path(actual_pdf_path).read_bytes()
+
+    if document_source is None:
+        if not pages:
+            raise ValueError(
+                "The original document could not be loaded."
+            )
+
+        document_source = parse_text_pages(
+            [text for _, text in pages]
+            if pages and isinstance(pages[0], tuple)
+            else list(pages),
+            document_hash=document_hash or "",
         )
-
-    # ========================================================
-    # PHASE 4 — AI EXTRACTION
-    # ========================================================
 
     try:
-        chunk_results = extract_chunks_in_parallel(
-            chunks,
+        normalized_result = run_extraction(
+            document_source,
             admin_feedback=feedback,
+            document_hash=document_hash or "",
         )
+        ensure_usable(normalized_result)
+
+    except ValueError:
+        raise
 
     except Exception as error:
         raise ValueError(
-            f"AI extraction failed on one or more chunks: {error}"
+            f"AI extraction failed: {error}"
         ) from error
-
-    if not chunk_results:
-        raise ValueError(
-            "No chunk extraction results were produced."
-        )
-
-    # ========================================================
-    # PHASE 5 — CONSERVATIVE AGGREGATION
-    # ========================================================
-
-    try:
-        aggregated_result = (
-            aggregate_chunk_extractions(
-                chunk_results
-            )
-        )
-
-    except ValueError as error:
-        raise ValueError(
-            "Retry extraction could not be safely "
-            f"aggregated: {error}"
-        ) from error
-
-    # ========================================================
-    # PHASE 6 — NORMALIZATION
-    # ========================================================
-
-    normalized_extraction = (
-        normalize_complete_extraction(
-            aggregated_result.extraction
-        )
-    )
-
-    normalized_result = AggregatedExtractionResult(
-        extraction=normalized_extraction,
-        evidence=aggregated_result.evidence,
-    )
-
-    # ========================================================
-    # PHASE 7 — VALIDATION
-    # ========================================================
-
-    validation_errors = (
-        validate_complete_extraction(
-            normalized_extraction
-        )
-    )
-
-    if validation_errors:
-        raise ValueError(
-            "Retry extraction failed validation: "
-            f"{validation_errors}"
-        )
 
     # ========================================================
     # PHASE 8 — CREATE NEW PENDING EXTRACTION
@@ -704,9 +657,8 @@ def retry_extraction(
                     )
                 ),
                 ai_summary=(
-                    "Retry extraction generated using the "
-                    "complete chunked extraction pipeline "
-                    "after administrator feedback."
+                    "Retry after administrator feedback. "
+                    + summarize(normalized_result)
                 ),
                 change_detected=False,
                 change_details=None,

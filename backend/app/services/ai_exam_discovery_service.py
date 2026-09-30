@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime,date
+from datetime import datetime, date
 import hashlib
+import logging
 import os
 import re
 from pathlib import Path
@@ -22,20 +23,10 @@ from app.ai.document_models import (
     DocumentPage,
     ParsedDocument,
 )
-from app.ai.chunk_aggregator import (
-    aggregate_chunk_extractions,
-)
-from app.ai.chunk_extractor import (
-    extract_chunk_information,
-)
-from app.ai.parallel_chunk_extraction import (
-    extract_chunks_in_parallel,
-)
-from app.ai.complete_extraction_normalizer import (
-    normalize_complete_extraction,
-)
-from app.ai.complete_extraction_validation import (
-    validate_complete_extraction,
+from app.ai.extraction.pipeline import (
+    ensure_usable,
+    run_extraction,
+    summarize,
 )
 from app.ai.extraction_serialization import (
     serialize_aggregated_extraction,
@@ -64,25 +55,53 @@ from app.services.web_search_service import (
 )
 
 
+# ============================================================
+# EXCEPTIONS
+# ============================================================
+
+
 class ExamDiscoveryError(RuntimeError):
     """Raised when the AI exam-discovery pipeline cannot complete safely."""
 
 
+class NoNotificationFoundError(ExamDiscoveryError):
+    """Official source verified, but no notification PDF could be found."""
+
+    def __init__(
+        self,
+        exam_name: str,
+        official_url: str | None,
+        pages_checked: int = 0,
+    ) -> None:
+        self.exam_name = exam_name
+        self.official_url = official_url
+        self.pages_checked = pages_checked
+
+        super().__init__(
+            f"No notification PDF found for {exam_name}. It may not be "
+            "published yet, or it may only be available as a web page."
+        )
+
+
+class DiscoveryPersistenceError(ExamDiscoveryError):
+    """Database write failed after a successful extraction."""
+
+
 # ============================================================
-# DEBUG LOGGING
+# LOGGING
 # ============================================================
+
+logger = logging.getLogger("ai_discovery")
 
 
 def _log(message: str) -> None:
     """
-    Flush discovery-stage logs immediately so long-running
-    frontend requests can be diagnosed from the backend terminal.
+    Log a discovery-stage message. Messages containing "FAILED"
+    are logged as warnings, everything else as info.
     """
 
-    print(
-        f"[AI DISCOVERY] {message}",
-        flush=True,
-    )
+    level = logging.WARNING if "FAILED" in message else logging.INFO
+    logger.log(level, message)
 
 
 # ============================================================
@@ -122,25 +141,19 @@ def _search_exam_sources(
     """
     Search the web for candidate sources.
 
-    Results are deduplicated by URL.
-
-    Search results are candidates only. They must pass the
-    separate source-verification step before being treated
-    as official.
+    Results are deduplicated by URL. They are candidates only and
+    must pass the separate source-verification step before being
+    treated as official.
     """
 
-    queries = _build_search_queries(
-        exam_name
-    )
+    queries = _build_search_queries(exam_name)
 
     candidates: list[dict] = []
     seen_urls: set[str] = set()
 
     for query in queries:
 
-        _log(
-            f"SEARCH START: {query}"
-        )
+        _log(f"SEARCH START: {query}")
 
         try:
             results = search_web(
@@ -149,9 +162,7 @@ def _search_exam_sources(
             )
 
         except Exception as error:
-            _log(
-                f"SEARCH FAILED: {query}"
-            )
+            _log(f"SEARCH FAILED: {query}")
 
             raise ExamDiscoveryError(
                 f"Web search failed for query: {query}"
@@ -164,10 +175,7 @@ def _search_exam_sources(
 
         for result in results:
 
-            if isinstance(
-                result,
-                SearchResult,
-            ):
+            if isinstance(result, SearchResult):
                 url = result.url
                 title = result.title
                 content = result.content
@@ -175,29 +183,13 @@ def _search_exam_sources(
                 provider = result.provider
                 result_id = result.result_id
 
-            elif isinstance(
-                result,
-                dict,
-            ):
-                url = result.get(
-                    "url"
-                )
-                title = result.get(
-                    "title"
-                )
-                content = result.get(
-                    "content",
-                    "",
-                )
-                score = result.get(
-                    "score"
-                )
-                provider = result.get(
-                    "provider"
-                )
-                result_id = result.get(
-                    "result_id"
-                )
+            elif isinstance(result, dict):
+                url = result.get("url")
+                title = result.get("title")
+                content = result.get("content", "")
+                score = result.get("score")
+                provider = result.get("provider")
+                result_id = result.get("result_id")
 
             else:
                 continue
@@ -208,9 +200,7 @@ def _search_exam_sources(
             if url in seen_urls:
                 continue
 
-            seen_urls.add(
-                url
-            )
+            seen_urls.add(url)
 
             candidates.append(
                 {
@@ -237,23 +227,13 @@ def _search_exam_sources(
 
 
 # ============================================================
-# SOURCE VERIFICATION
-# ============================================================
-
-
-# ============================================================
 # BLOCKED SOURCE HOSTS
 # ============================================================
 #
 # Social/general-audience platforms are never a conducting
-# authority's own official notification host, but they get
-# indexed heavily (official accounts posting announcements,
-# unofficial reposts, coaching-institute promo posts, etc.) and
-# can otherwise crowd out or get mistaken for the real official
-# site by the AI verifier. This is a hard, deterministic
-# exclusion - it never reaches the LLM prompt or the scored
-# fallback, so a misjudgment here can't happen regardless of
-# what any individual provider decides.
+# authority's own official notification host. This is a hard,
+# deterministic exclusion that never reaches the LLM prompt or
+# the scored fallback.
 
 _BLOCKED_SOURCE_HOSTS = (
     "instagram.com",
@@ -285,6 +265,11 @@ def _is_blocked_source_host(hostname: str) -> bool:
     )
 
 
+# ============================================================
+# SOURCE VERIFICATION
+# ============================================================
+
+
 def _verify_source(
     exam_name: str,
     candidates: list[dict],
@@ -296,9 +281,7 @@ def _verify_source(
     The verifier is constrained to URLs returned by search.
     """
 
-    _log(
-        "SOURCE VERIFICATION START"
-    )
+    _log("SOURCE VERIFICATION START")
 
     candidates = [
         candidate
@@ -520,9 +503,8 @@ def _extract_exam_tokens(exam_name: str) -> list[str]:
     """
     Break the administrator-supplied exam name into meaningful
     lowercase tokens used to check relevance of a candidate link
-    or document. Generic words and bare "exam"/"examination" are
-    excluded so scoring focuses on what actually identifies this
-    exam (e.g. "GATE", "NEET", "2027").
+    or document. Generic words are excluded so scoring focuses on
+    what actually identifies this exam (e.g. "GATE", "NEET", "2027").
     """
 
     tokens = re.findall(r"[a-z0-9]+", exam_name.lower())
@@ -553,9 +535,7 @@ def _score_pdf_link(
 
     value = f"{url} {text}".lower()
 
-    # ------------------------------------------------------------
     # HARD NEGATIVES
-    # ------------------------------------------------------------
 
     hard_negative_terms = (
         "history",
@@ -588,15 +568,10 @@ def _score_pdf_link(
         "old paper",
     )
 
-    if any(
-        term in value
-        for term in hard_negative_terms
-    ):
+    if any(term in value for term in hard_negative_terms):
         return -100
 
-    # ------------------------------------------------------------
     # BASE SCORE
-    # ------------------------------------------------------------
 
     score = 0
 
@@ -625,13 +600,9 @@ def _score_pdf_link(
         if keyword in value:
             score += 6
 
-    # ------------------------------------------------------------
     # EXAM IDENTITY
-    # ------------------------------------------------------------
 
-    exam_tokens = _extract_exam_tokens(
-        exam_name
-    )
+    exam_tokens = _extract_exam_tokens(exam_name)
 
     if exam_tokens:
         matched = sum(
@@ -645,24 +616,15 @@ def _score_pdf_link(
         else:
             score += matched * 4
 
-    # ------------------------------------------------------------
     # YEAR
-    # ------------------------------------------------------------
 
-    exam_years = set(
-        _extract_year_tokens(exam_name)
-    )
+    exam_years = set(_extract_year_tokens(exam_name))
 
     if exam_years:
         parsed_url = urlparse(url)
 
-        url_years = set(
-            _extract_year_tokens(parsed_url.path)
-        )
-
-        text_years = set(
-            _extract_year_tokens(text)
-        )
+        url_years = set(_extract_year_tokens(parsed_url.path))
+        text_years = set(_extract_year_tokens(text))
 
         # An explicit year in the document URL must match
         # the requested exam year.
@@ -677,9 +639,8 @@ def _score_pdf_link(
                 score += 5
             else:
                 score -= 8
-    # ------------------------------------------------------------
+
     # GENERIC NEGATIVES
-    # ------------------------------------------------------------
 
     for keyword in _NEGATIVE_PDF_KEYWORDS:
         if keyword in value:
@@ -687,12 +648,11 @@ def _score_pdf_link(
 
     return score
 
+
 def _get_hostname(
     url: str,
 ) -> str:
-    """
-    Return a normalized hostname.
-    """
+    """Return a normalized hostname."""
 
     return (
         urlparse(url)
@@ -734,6 +694,7 @@ def _is_same_official_host(
     except Exception:
         return False
 
+
 def _add_pdf_candidate(
     pdf_candidates: dict[str, tuple[int, dict]],
     url: str,
@@ -743,11 +704,9 @@ def _add_pdf_candidate(
     """
     Add or update a PDF candidate using deterministic scoring.
 
-    Candidates that score at or below zero (no exam-identifying
-    token present, or matching a known non-notification page type
-    such as "history"/"gallery"/"annual report") are never added.
-    This is what stops an unrelated official PDF from ever being
-    picked as a fallback simply because it was the only one found.
+    Candidates that score at or below zero are never added, so an
+    unrelated official PDF is never picked merely because it was
+    the only one found.
     """
 
     if not url:
@@ -762,57 +721,37 @@ def _add_pdf_candidate(
     if score <= 0:
         return
 
-    existing = pdf_candidates.get(
-        url
-    )
+    existing = pdf_candidates.get(url)
 
     candidate = {
         "url": url,
         "text": text,
     }
 
-    if (
-        existing is None
-        or score > existing[0]
-    ):
-        pdf_candidates[url] = (
-            score,
-            candidate,
-        )
+    if existing is None or score > existing[0]:
+        pdf_candidates[url] = (score, candidate)
 
 
 def _get_result_fields(
     result,
 ) -> tuple[str | None, str, str]:
-    """
-    Normalize SearchResult/dict results.
-    """
+    """Normalize SearchResult/dict results."""
 
-    if isinstance(
-        result,
-        SearchResult,
-    ):
+    if isinstance(result, SearchResult):
         return (
             result.url,
             result.title or "",
             result.content or "",
         )
 
-    if isinstance(
-        result,
-        dict,
-    ):
+    if isinstance(result, dict):
         return (
             result.get("url"),
             result.get("title") or "",
             result.get("content") or "",
         )
 
-    return (
-        None,
-        "",
-        "",
-    )
+    return (None, "", "")
 
 
 # ============================================================
@@ -907,23 +846,16 @@ def _download_pdf_with_session(
         content = response.content
 
     if not content:
-        raise ValueError(
-            "Downloaded document is empty."
-        )
+        raise ValueError("Downloaded document is empty.")
 
     if not content.startswith(b"%PDF-"):
-        content_type = response.headers.get(
-            "Content-Type",
-            "",
-        )
+        content_type = response.headers.get("Content-Type", "")
         raise ValueError(
             "Downloaded content is not a valid PDF "
             f"(content_type={content_type})."
         )
 
-    document_hash = hashlib.sha256(
-        content
-    ).hexdigest()
+    document_hash = hashlib.sha256(content).hexdigest()
 
     filename = _pdf_filename(url)
     file_path = _PDF_STORAGE_DIR / filename
@@ -942,82 +874,6 @@ def _download_pdf_with_session(
     }
 
 
-def _download_best_pdf_candidate(
-    pdf_candidates: dict[str, tuple[int, dict]],
-    exam_name: str = "",
-) -> dict | None:
-
-    ordered_candidates = sorted(
-        pdf_candidates.values(),
-        key=lambda item: (
-            item[0],
-            item[1]["url"],
-        ),
-        reverse=True,
-    )
-
-    for score, candidate in ordered_candidates:
-
-        candidate_url = candidate["url"]
-
-        # Never download obviously irrelevant candidates.
-        if score < 20:
-            _log(
-                f"SKIPPING PDF: score={score} "
-                f"url={candidate_url}"
-            )
-            continue
-
-        _log(
-            f"TRYING PDF: score={score} "
-            f"url={candidate_url}"
-        )
-
-        try:
-            pdf = download_pdf(
-                candidate_url
-            )
-
-            relevant, reason = (
-                _pdf_content_looks_relevant(
-                    pdf["content"],
-                    exam_name,
-                )
-            )
-
-            if not relevant:
-
-                _log(
-                    f"PDF CONTENT REJECTED: "
-                    f"{candidate_url} -> {reason}"
-                )
-
-                try:
-                    Path(
-                        pdf["path"]
-                    ).unlink(
-                        missing_ok=True
-                    )
-                except Exception:
-                    pass
-
-                continue
-
-            _log(
-                f"PDF ACCEPTED: {candidate_url}"
-            )
-
-            return pdf
-
-        except Exception as error:
-
-            _log(
-                f"PDF CANDIDATE FAILED: "
-                f"{candidate_url} -> {error}"
-            )
-
-    return None
-
 def _pdf_content_looks_relevant(
     content: bytes,
     exam_name: str,
@@ -1026,24 +882,15 @@ def _pdf_content_looks_relevant(
     Sanity-check a downloaded PDF's actual *content* against the
     exam it is supposed to be the notification for.
 
-    `_score_pdf_link()` only ever looks at the URL and the
-    surrounding link text on the page it was found on - it never
-    sees what the PDF itself actually says. That is enough to
-    reject an obviously unrelated document, but it can still be
-    fooled by a same-domain PDF with a generic/undescriptive link
-    (e.g. a "History of GATE" retrospective linked with plain text
-    like "About" or "Download") that happens to pick up enough
-    domain-substring/keyword points to pass the URL-level score.
-    This is a second, independent check against the real text of
-    the document before it is accepted as the official notification.
+    _score_pdf_link() only looks at the URL and link text, never at
+    what the PDF says. This is a second, independent check against
+    the real text of the document.
 
-    Deliberately conservative: this only rejects a document when it
-    is fairly confident something is wrong (a known non-notification
+    Deliberately conservative: it only rejects a document when it is
+    fairly confident something is wrong (a known non-notification
     page type is named right at the top, or none of the exam's own
-    identifying tokens appear anywhere in the document at all). If
-    the PDF can't be parsed here, that is left for the main
-    extraction step to report - this function just returns "looks
-    fine" rather than blocking on a parsing problem.
+    identifying tokens appear in the first pages). If the PDF can't
+    be parsed here, that is left for the main extraction step.
     """
 
     try:
@@ -1066,9 +913,6 @@ def _pdf_content_looks_relevant(
     if not first_pages_text.strip():
         return True, ""
 
-    # A known non-notification page type named right at the start
-    # of the document (its title/heading) is a strong signal this
-    # is the wrong document, regardless of how it was linked to.
     heading_text = first_pages_text[:300]
 
     for keyword in _NEGATIVE_PDF_KEYWORDS:
@@ -1106,8 +950,7 @@ def _download_best_pdf_candidate(
     download_pdf() performs actual PDF signature validation.
     _pdf_content_looks_relevant() additionally checks the
     downloaded document's own text against the exam it is
-    supposed to be for, since URL/link-text scoring alone can be
-    fooled by a same-domain document with generic link text.
+    supposed to be for.
     """
 
     ordered_candidates = sorted(
@@ -1129,9 +972,7 @@ def _download_best_pdf_candidate(
         )
 
         try:
-            pdf = download_pdf(
-                candidate_url
-            )
+            pdf = download_pdf(candidate_url)
 
         except Exception as error:
             _log(
@@ -1155,9 +996,7 @@ def _download_best_pdf_candidate(
                 pass
             continue
 
-        _log(
-            f"PDF DOWNLOAD SUCCESS: {candidate_url}"
-        )
+        _log(f"PDF DOWNLOAD SUCCESS: {candidate_url}")
 
         return pdf
 
@@ -1175,36 +1014,20 @@ def _search_official_pdf_candidates(
 ) -> dict[str, tuple[int, dict]]:
     """
     Search specifically for PDFs on the verified official
-    hostname.
-
-    This is preferred over broad website crawling.
+    hostname. Preferred over broad website crawling.
     """
 
-    pdf_candidates: dict[
-        str,
-        tuple[int, dict],
-    ] = {}
+    pdf_candidates: dict[str, tuple[int, dict]] = {}
 
     queries = [
-        (
-            f'site:{official_host} '
-            f'"{exam_name}" filetype:pdf'
-        ),
-        (
-            f'site:{official_host} '
-            f'{exam_name} notification pdf'
-        ),
-        (
-            f'site:{official_host} '
-            f'{exam_name} information brochure'
-        ),
+        f'site:{official_host} "{exam_name}" filetype:pdf',
+        f'site:{official_host} {exam_name} notification pdf',
+        f'site:{official_host} {exam_name} information brochure',
     ]
 
     for query in queries:
 
-        _log(
-            f"TARGETED PDF SEARCH START: {query}"
-        )
+        _log(f"TARGETED PDF SEARCH START: {query}")
 
         try:
             results = search_web(
@@ -1213,10 +1036,7 @@ def _search_official_pdf_candidates(
             )
 
         except Exception as error:
-            _log(
-                f"TARGETED PDF SEARCH FAILED: {error}"
-            )
-
+            _log(f"TARGETED PDF SEARCH FAILED: {error}")
             continue
 
         _log(
@@ -1226,24 +1046,15 @@ def _search_official_pdf_candidates(
 
         for result in results:
 
-            url, title, content = (
-                _get_result_fields(
-                    result
-                )
-            )
+            url, title, content = _get_result_fields(result)
 
             if not url:
                 continue
 
-            if not _is_same_official_host(
-                url,
-                official_host,
-            ):
+            if not _is_same_official_host(url, official_host):
                 continue
 
-            text = (
-                f"{title} {content}"
-            ).strip()
+            text = f"{title} {content}".strip()
 
             if ".pdf" not in url.lower():
                 continue
@@ -1279,8 +1090,6 @@ def _extract_document_urls_from_html(
 
     Some official sites expose download controls as buttons or
     JavaScript handlers instead of normal <a href="..."> links.
-    A crawler that only inspects <a> tags can therefore miss the
-    actual brochure/notification PDF.
     """
 
     soup = BeautifulSoup(
@@ -1290,8 +1099,6 @@ def _extract_document_urls_from_html(
 
     found: dict[str, str] = {}
 
-    # Normal anchors, buttons, and elements carrying common URL
-    # attributes are all inspected.
     for element in soup.find_all(True):
         text = element.get_text(
             " ",
@@ -1319,10 +1126,7 @@ def _extract_document_urls_from_html(
             # Only treat the raw attribute value itself as a URL/path
             # candidate when it actually looks like one. Attributes
             # such as `onclick` frequently hold arbitrary JavaScript
-            # (e.g. toggleSub('exam-sub', 'mob-exam')) rather than a
-            # URL - blindly urljoin()-ing that text produces a bogus
-            # "URL" that only ever 404s and wastes crawl budget that
-            # should go to real pages.
+            # rather than a URL.
             stripped_value = raw_value.strip()
 
             candidates = (
@@ -1335,7 +1139,7 @@ def _extract_document_urls_from_html(
                 else []
             )
 
-            # Then extract URL/path-looking strings embedded in
+            # Extract URL/path-looking strings embedded in
             # JavaScript such as window.open('/static/file.pdf').
             candidates.extend(
                 re.findall(
@@ -1364,9 +1168,7 @@ def _extract_document_urls_from_html(
                     candidate,
                 )
 
-                if not absolute_url.startswith(
-                    "https://"
-                ):
+                if not absolute_url.startswith("https://"):
                     continue
 
                 if not _is_same_official_host(
@@ -1402,7 +1204,9 @@ def _official_navigation_urls(
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
     paths = (
-        parsed.path,
+        # An empty path (e.g. https://iimcat.ac.in) means the homepage,
+        # which is the page with the real links, so it must be crawled.
+        parsed.path or "/",
         "/download",
         "/downloads",
         "/notification",
@@ -1447,15 +1251,16 @@ def _bounded_official_pdf_discovery(
     official_url: str,
     official_host: str,
     exam_name: str = "",
-) -> dict[str, tuple[int, dict]]:
+) -> tuple[dict[str, tuple[int, dict]], int]:
     """
     Perform a bounded crawl focused on official download and
     notification pages.
 
-    The crawl deliberately checks common official document pages
-    before following ordinary navigation links. It also inspects
-    JavaScript/data attributes because modern sites frequently put
-    PDF download URLs behind buttons rather than <a href> elements.
+    Returns (pdf_candidates, pages_checked).
+
+    The crawl also inspects JavaScript/data attributes because modern
+    sites frequently put PDF download URLs behind buttons rather than
+    <a href> elements.
     """
 
     MAX_PAGES = 10
@@ -1468,26 +1273,15 @@ def _bounded_official_pdf_discovery(
         official_url,
         official_host,
     ):
-        queue.append(
-            (
-                url,
-                0,
-            )
-        )
+        queue.append((url, 0))
 
     visited: set[str] = set()
 
-    pdf_candidates: dict[
-        str,
-        tuple[int, dict],
-    ] = {}
+    pdf_candidates: dict[str, tuple[int, dict]] = {}
 
     pages_checked = 0
 
-    while (
-        queue
-        and pages_checked < MAX_PAGES
-    ):
+    while queue and pages_checked < MAX_PAGES:
 
         current_url, depth = queue.popleft()
 
@@ -1507,9 +1301,7 @@ def _bounded_official_pdf_discovery(
         )
 
         try:
-            response, content_type = fetch_website(
-                current_url
-            )
+            response, content_type = fetch_website(current_url)
 
         except Exception as error:
             _log(
@@ -1533,16 +1325,13 @@ def _bounded_official_pdf_discovery(
         if "text/html" not in content_type.lower():
             continue
 
-        # Inspect every relevant URL-bearing HTML attribute.
         document_urls = _extract_document_urls_from_html(
             response.text,
             current_url,
             official_host,
         )
 
-        relevant_links: list[
-            tuple[int, str, str]
-        ] = []
+        relevant_links: list[tuple[int, str, str]] = []
 
         for absolute_url, link_text in document_urls:
             score = _score_pdf_link(
@@ -1586,19 +1375,12 @@ def _bounded_official_pdf_discovery(
                 for keyword in relevant_keywords
             ):
                 relevant_links.append(
-                    (
-                        score,
-                        absolute_url,
-                        link_text,
-                    )
+                    (score, absolute_url, link_text)
                 )
 
         if depth < MAX_DEPTH:
             relevant_links.sort(
-                key=lambda item: (
-                    item[0],
-                    item[1],
-                ),
+                key=lambda item: (item[0], item[1]),
                 reverse=True,
             )
 
@@ -1606,16 +1388,9 @@ def _bounded_official_pdf_discovery(
                 _,
                 next_url,
                 _,
-            ) in relevant_links[
-                :MAX_FOLLOW_LINKS_PER_PAGE
-            ]:
+            ) in relevant_links[:MAX_FOLLOW_LINKS_PER_PAGE]:
                 if next_url not in visited:
-                    queue.append(
-                        (
-                            next_url,
-                            depth + 1,
-                        )
-                    )
+                    queue.append((next_url, depth + 1))
 
     _log(
         f"BOUNDED DISCOVERY COMPLETE: "
@@ -1623,7 +1398,7 @@ def _bounded_official_pdf_discovery(
         f"{len(pdf_candidates)} PDF candidates"
     )
 
-    return pdf_candidates
+    return pdf_candidates, pages_checked
 
 
 # ============================================================
@@ -1646,35 +1421,22 @@ def _find_official_pdf(
         3. Targeted PDF search on verified hostname
         4. Bounded official-site discovery
 
-    Every accepted PDF must:
-
-        - belong to the verified hostname
-        - successfully download
-        - pass actual PDF signature validation
+    Raises NoNotificationFoundError when the source is verified but
+    no PDF can be found.
     """
 
-    _log(
-        f"PDF DISCOVERY START: {official_url}"
-    )
+    _log(f"PDF DISCOVERY START: {official_url}")
 
-    # --------------------------------------------------------
     # Fetch verified source
-    # --------------------------------------------------------
 
-    _log(
-        "FETCHING VERIFIED OFFICIAL SOURCE"
-    )
+    _log("FETCHING VERIFIED OFFICIAL SOURCE")
 
     try:
-        response, content_type = fetch_website(
-            official_url
-        )
+        response, content_type = fetch_website(official_url)
 
     except Exception as error:
 
-        _log(
-            f"VERIFIED SOURCE FETCH FAILED: {error}"
-        )
+        _log(f"VERIFIED SOURCE FETCH FAILED: {error}")
 
         raise ExamDiscoveryError(
             "Unable to fetch the verified official source."
@@ -1685,18 +1447,14 @@ def _find_official_pdf(
         f"content_type={content_type}"
     )
 
-    # --------------------------------------------------------
     # Verified source itself is PDF
-    # --------------------------------------------------------
 
     if is_pdf(
         content_type,
         official_url,
     ):
 
-        _log(
-            "VERIFIED SOURCE IS ITSELF A PDF"
-        )
+        _log("VERIFIED SOURCE IS ITSELF A PDF")
 
         try:
             return _download_pdf_with_session(
@@ -1710,9 +1468,7 @@ def _find_official_pdf(
                 "The verified official PDF could not be downloaded."
             ) from error
 
-    # --------------------------------------------------------
     # Verified source must be HTML
-    # --------------------------------------------------------
 
     if "text/html" not in content_type.lower():
 
@@ -1721,29 +1477,17 @@ def _find_official_pdf(
             "a PDF nor an HTML page."
         )
 
-    official_host = _get_hostname(
-        official_url
-    )
+    official_host = _get_hostname(official_url)
 
-    # ========================================================
-    # STEP 1
-    # Inspect PDF URLs from original search.
-    # ========================================================
+    # STEP 1: PDF URLs from original search
 
-    _log(
-        "CHECKING PDFS FROM ORIGINAL SEARCH RESULTS"
-    )
+    _log("CHECKING PDFS FROM ORIGINAL SEARCH RESULTS")
 
-    existing_search_pdfs: dict[
-        str,
-        tuple[int, dict],
-    ] = {}
+    existing_search_pdfs: dict[str, tuple[int, dict]] = {}
 
     for candidate in candidates:
 
-        candidate_url = candidate.get(
-            "url"
-        )
+        candidate_url = candidate.get("url")
 
         if not candidate_url:
             continue
@@ -1757,15 +1501,8 @@ def _find_official_pdf(
         if ".pdf" not in candidate_url.lower():
             continue
 
-        title = (
-            candidate.get("title")
-            or ""
-        )
-
-        text = (
-            candidate.get("text")
-            or ""
-        )
+        title = candidate.get("title") or ""
+        text = candidate.get("text") or ""
 
         _add_pdf_candidate(
             existing_search_pdfs,
@@ -1787,20 +1524,13 @@ def _find_official_pdf(
     if pdf is not None:
         return pdf
 
-    # ========================================================
-    # STEP 2
-    # Targeted official-domain PDF search.
-    # ========================================================
+    # STEP 2: Targeted official-domain PDF search
 
-    _log(
-        "STARTING TARGETED OFFICIAL PDF SEARCH"
-    )
+    _log("STARTING TARGETED OFFICIAL PDF SEARCH")
 
-    targeted_candidates = (
-        _search_official_pdf_candidates(
-            exam_name=exam_name,
-            official_host=official_host,
-        )
+    targeted_candidates = _search_official_pdf_candidates(
+        exam_name=exam_name,
+        official_host=official_host,
     )
 
     pdf = _download_best_pdf_candidate(
@@ -1811,21 +1541,14 @@ def _find_official_pdf(
     if pdf is not None:
         return pdf
 
-    # ========================================================
-    # STEP 3
-    # Bounded official-site discovery.
-    # ========================================================
+    # STEP 3: Bounded official-site discovery
 
-    _log(
-        "STARTING BOUNDED OFFICIAL-SITE DISCOVERY"
-    )
+    _log("STARTING BOUNDED OFFICIAL-SITE DISCOVERY")
 
-    bounded_candidates = (
-        _bounded_official_pdf_discovery(
-            official_url=official_url,
-            official_host=official_host,
-            exam_name=exam_name,
-        )
+    bounded_candidates, pages_checked = _bounded_official_pdf_discovery(
+        official_url=official_url,
+        official_host=official_host,
+        exam_name=exam_name,
     )
 
     pdf = _download_best_pdf_candidate(
@@ -1836,11 +1559,10 @@ def _find_official_pdf(
     if pdf is not None:
         return pdf
 
-    raise ExamDiscoveryError(
-        "No official PDF notification could be found after "
-        "checking the verified source, original search results, "
-        "targeted official-domain PDF search, and bounded "
-        "official-source discovery."
+    raise NoNotificationFoundError(
+        exam_name=exam_name,
+        official_url=official_url,
+        pages_checked=pages_checked,
     )
 
 
@@ -1859,29 +1581,15 @@ def _parse_pdf_document(
     """
     Parse the official PDF while preserving physical page boundaries.
 
-    The parser deliberately does not perform AI extraction.
-
-    Its only responsibilities are:
-
-        PDF
-          ↓
-        physical pages
-          ↓
-        ParsedDocument
-
-    Keeping parsing separate from AI extraction allows later stages
-    to reason about sections and evidence without losing page
+    The parser deliberately does not perform AI extraction, so later
+    stages can reason about sections and evidence without losing page
     provenance.
     """
 
     if not pdf_content:
-        raise ExamDiscoveryError(
-            "The official PDF is empty."
-        )
+        raise ExamDiscoveryError("The official PDF is empty.")
 
-    _log(
-        "OPENING PDF FOR PAGE-AWARE PARSING"
-    )
+    _log("OPENING PDF FOR PAGE-AWARE PARSING")
 
     try:
         document = pymupdf.open(
@@ -1901,9 +1609,7 @@ def _parse_pdf_document(
             page_number = index + 1
 
             try:
-                text = page.get_text(
-                    "text",
-                ) or ""
+                text = page.get_text("text") or ""
 
             except Exception as error:
                 _log(
@@ -1973,167 +1679,47 @@ def _extract_and_validate_pdf(
     source_url: str,
     document_hash: str,
     file_path: str | None = None,
+    exam_name_hint: str | None = None,
 ) -> AggregatedExtractionResult:
     """
-    Run the existing production extraction pipeline:
+    Run extraction pipeline v2:
 
-        PDF
-          ↓
-        pages
-          ↓
-        lossless chunks
-          ↓
-        AI extraction
-          ↓
-        aggregation
-          ↓
-        normalization
-          ↓
-        validation
+        PDF -> parse -> targeted retrieval -> LLM facts
+            -> grounding -> rule compilation
+            -> normalization -> validation
+
+    Problems are recorded as issues on the result for the reviewer.
     """
 
-    document = _parse_pdf_document(
-        pdf_content,
-        source_url=source_url,
-        document_hash=document_hash,
-        file_path=file_path,
-    )
-
-    pages = [
-        page.text
-        for page in document.pages
-    ]
-
-    chunks = chunk_document_pages(
-        pages,
-        chunk_size=16000,
-    )
-
-    if not chunks:
-        raise ExamDiscoveryError(
-            "The official PDF produced no extractable chunks."
-        )
-
-    _log(
-        f"AI EXTRACTION: {len(chunks)} chunks (parallel)"
-    )
+    _log("AI EXTRACTION: pipeline v2")
 
     try:
-        chunk_results = extract_chunks_in_parallel(chunks)
+        result = run_extraction(
+            pdf_content,
+            exam_name_hint=exam_name_hint,
+            source_url=source_url,
+            document_hash=document_hash,
+        )
+        ensure_usable(result)
+
+    except ValueError as error:
+        raise ExamDiscoveryError(str(error)) from error
 
     except Exception as error:
-        _log(
-            f"AI EXTRACTION FAILED: {type(error).__name__}: {error}"
-        )
+        _log(f"AI EXTRACTION FAILED: {type(error).__name__}: {error}")
 
         raise ExamDiscoveryError(
             "AI extraction failed while processing "
             "the official notification."
         ) from error
 
-    if not chunk_results:
-        raise ExamDiscoveryError(
-            "No AI extraction results were produced."
-        )
-
-    # --------------------------------------------------------
-    # Aggregate
-    # --------------------------------------------------------
-
     _log(
-        "AI EXTRACTION AGGREGATION START"
+        f"AI EXTRACTION COMPLETE: "
+        f"{len(result.blocking_issues)} blocking issue(s), "
+        f"{len(result.issues)} issue(s) total"
     )
 
-    try:
-        aggregated_result = (
-            aggregate_chunk_extractions(
-                chunk_results
-            )
-        )
-
-    except Exception as error:
-
-        _log(
-            f"AI EXTRACTION AGGREGATION FAILED: "
-            f"{type(error).__name__}: {error}"
-        )
-
-        raise ExamDiscoveryError(
-            "AI extraction results could not be safely aggregated."
-        ) from error
-
-    _log(
-        "AI EXTRACTION AGGREGATION COMPLETE"
-    )
-
-    # --------------------------------------------------------
-    # Normalize
-    # --------------------------------------------------------
-
-    _log(
-        "EXTRACTION NORMALIZATION START"
-    )
-    
-
-    try:
-        normalized_extraction = (
-            normalize_complete_extraction(
-                aggregated_result.extraction
-            )
-        )
-
-    except Exception as error:
-
-        raise ExamDiscoveryError(
-            "The extracted examination information could not "
-            "be normalized safely."
-        ) from error
-
-    _log(
-        "EXTRACTION NORMALIZATION COMPLETE"
-    )
-    _log(
-    f"NORMALIZED EXTRACTION: {normalized_extraction.model_dump()}"
-    )
-
-    normalized_result = AggregatedExtractionResult(
-        extraction=normalized_extraction,
-        evidence=aggregated_result.evidence,
-    )
-
-    # --------------------------------------------------------
-    # Validate
-    # --------------------------------------------------------
-
-    _log(
-        "EXTRACTION VALIDATION START"
-    )
-
-    try:
-        validation_errors = (
-            validate_complete_extraction(
-                normalized_extraction
-            )
-        )
-
-    except Exception as error:
-
-        raise ExamDiscoveryError(
-            "Complete extraction validation failed."
-        ) from error
-
-    if validation_errors:
-
-        raise ExamDiscoveryError(
-            "The extracted examination information failed "
-            f"validation: {validation_errors}"
-        )
-
-    _log(
-        "EXTRACTION VALIDATION COMPLETE"
-    )
-
-    return normalized_result
+    return result
 
 
 # ============================================================
@@ -2146,22 +1732,16 @@ def _get_or_create_conducting_body(
     body_name: str,
     official_url: str,
 ) -> ConductingBody:
-    """
-    Reuse an existing conducting body when possible.
-    """
+    """Reuse an existing conducting body when possible."""
 
-    body_name = (
-        body_name or ""
-    ).strip()
+    body_name = (body_name or "").strip()
 
     if not body_name:
         raise ExamDiscoveryError(
             "The extraction did not identify a conducting body."
         )
 
-    parsed = urlparse(
-        official_url
-    )
+    parsed = urlparse(official_url)
 
     main_website = (
         f"{parsed.scheme}://{parsed.netloc}/"
@@ -2171,10 +1751,7 @@ def _get_or_create_conducting_body(
 
     existing = db.scalar(
         select(ConductingBody)
-        .where(
-            ConductingBody.name
-            == body_name
-        )
+        .where(ConductingBody.name == body_name)
         .limit(1)
     )
 
@@ -2188,10 +1765,7 @@ def _get_or_create_conducting_body(
         logo_url=None,
     )
 
-    db.add(
-        body
-    )
-
+    db.add(body)
     db.flush()
 
     return body
@@ -2206,10 +1780,7 @@ def _get_or_create_exam(
 
     existing = db.scalar(
         select(Exam)
-        .where(
-            Exam.name
-            == exam_name
-        )
+        .where(Exam.name == exam_name)
         .limit(1)
     )
 
@@ -2225,10 +1796,7 @@ def _get_or_create_exam(
         status="ACTIVE",
     )
 
-    db.add(
-        exam
-    )
-
+    db.add(exam)
     db.flush()
 
     return exam
@@ -2247,9 +1815,7 @@ def _create_official_notification(
     extraction: AggregatedExtractionResult,
 ) -> OfficialNotification:
 
-    information = (
-        extraction.extraction.exam_information
-    )
+    information = extraction.extraction.exam_information
 
     notification = OfficialNotification(
         exam_id=exam.exam_id,
@@ -2258,15 +1824,9 @@ def _create_official_notification(
             or exam.name
         ),
         notification_type="EXAM",
-        release_date=(
-            information.release_date
-        ),
-        application_start_date=(
-            information.application_start_date
-        ),
-        application_end_date=(
-            information.application_end_date
-        ),
+        release_date=information.release_date,
+        application_start_date=information.application_start_date,
+        application_end_date=information.application_end_date,
         official_url=official_url,
         pdf_path=pdf_path,
         ai_summary=(
@@ -2279,32 +1839,18 @@ def _create_official_notification(
         downloaded_on=datetime.now(),
     )
 
-    db.add(
-        notification
-    )
-
+    db.add(notification)
     db.flush()
 
-    # --------------------------------------------------------
     # Persist extracted exam dates
-    # --------------------------------------------------------
 
-    for exam_date in (
-        information.exam_dates
-        or []
-    ):
+    for exam_date in (information.exam_dates or []):
 
         db.add(
             ExamDate(
-                notification_id=(
-                    notification.notification_id
-                ),
-                start_date=(
-                    exam_date.start_date
-                ),
-                end_date=(
-                    exam_date.end_date
-                ),
+                notification_id=notification.notification_id,
+                start_date=exam_date.start_date,
+                end_date=exam_date.end_date,
             )
         )
 
@@ -2323,33 +1869,23 @@ def _create_pending_extraction(
     extraction: AggregatedExtractionResult,
 ) -> ExtractionHistory:
 
-    extracted_content = (
-        serialize_aggregated_extraction(
-            extraction
-        )
+    extracted_content = serialize_aggregated_extraction(
+        extraction
     )
 
     history = ExtractionHistory(
-        notification_id=(
-            notification.notification_id
-        ),
+        notification_id=notification.notification_id,
         extraction_type="COMPLETE_EXTRACTION",
         source_pdf_path=pdf_path,
         extracted_content=extracted_content,
-        ai_summary=(
-            "AI discovery extraction completed "
-            "successfully. Awaiting administrator approval."
-        ),
+        ai_summary=summarize(extraction),
         change_detected=False,
         change_details=None,
         extraction_status="PENDING",
         created_at=datetime.now(),
     )
 
-    db.add(
-        history
-    )
-
+    db.add(history)
     db.flush()
 
     return history
@@ -2366,29 +1902,11 @@ def _discover_exam_once(
     """
     Complete AI exam-discovery pipeline.
 
-    Flow:
-
-        exam name
-          ↓
-        web search
-          ↓
-        candidate sources
-          ↓
-        official-source verification
-          ↓
-        official PDF
-          ↓
-        existing AI extraction pipeline
-          ↓
-        normalization
-          ↓
-        validation
-          ↓
-        database records
-          ↓
-        PENDING extraction
-          ↓
-        administrator review
+        exam name -> web search -> candidate sources
+        -> official-source verification -> official PDF
+        -> AI extraction -> normalization -> validation
+        -> database records -> PENDING extraction
+        -> administrator review
 
     Nothing is automatically approved.
     """
@@ -2396,47 +1914,29 @@ def _discover_exam_once(
     exam_name = exam_name.strip()
 
     if not exam_name:
-        raise ValueError(
-            "Exam name cannot be empty."
-        )
+        raise ValueError("Exam name cannot be empty.")
 
     if len(exam_name) > 200:
-        raise ValueError(
-            "Exam name cannot exceed 200 characters."
-        )
+        raise ValueError("Exam name cannot exceed 200 characters.")
 
-    _log(
-        f"PIPELINE START: {exam_name}"
-    )
+    _log(f"PIPELINE START: {exam_name}")
 
-    # --------------------------------------------------------
     # 1. Search
-    # --------------------------------------------------------
 
-    candidates = _search_exam_sources(
-        exam_name
-    )
+    candidates = _search_exam_sources(exam_name)
 
-    # --------------------------------------------------------
     # 2. Verify official source
-    # --------------------------------------------------------
 
     verification = _verify_source(
         exam_name,
         candidates,
     )
 
-    official_url = (
-        verification.selected_url
-    )
+    official_url = verification.selected_url
 
-    _log(
-        f"VERIFIED OFFICIAL SOURCE: {official_url}"
-    )
+    _log(f"VERIFIED OFFICIAL SOURCE: {official_url}")
 
-    # --------------------------------------------------------
     # 3. Locate and download official PDF
-    # --------------------------------------------------------
 
     pdf = _find_official_pdf(
         exam_name=exam_name,
@@ -2444,13 +1944,8 @@ def _discover_exam_once(
         candidates=candidates,
     )
 
-    pdf_content = pdf.get(
-        "content"
-    )
-
-    pdf_path = pdf.get(
-        "path"
-    )
+    pdf_content = pdf.get("content")
+    pdf_path = pdf.get("path")
 
     if not pdf_content:
         raise ExamDiscoveryError(
@@ -2462,32 +1957,23 @@ def _discover_exam_once(
             "Official PDF was not persisted to storage."
         )
 
-    _log(
-        f"PDF DISCOVERY COMPLETE: {pdf_path}"
-    )
+    _log(f"PDF DISCOVERY COMPLETE: {pdf_path}")
 
-    # --------------------------------------------------------
-    # 4. Existing AI extraction
-    # --------------------------------------------------------
+    # 4. AI extraction
 
-    _log(
-        "STARTING AI EXTRACTION"
-    )
+    _log("STARTING AI EXTRACTION")
 
     extraction = _extract_and_validate_pdf(
         pdf_content,
         source_url=official_url,
         document_hash=pdf.get("document_hash") or "",
         file_path=str(pdf_path),
+        exam_name_hint=exam_name,
     )
 
-    _log(
-        "AI EXTRACTION COMPLETE"
-    )
+    _log("AI EXTRACTION COMPLETE")
 
-    information = (
-        extraction.extraction.exam_information
-    )
+    information = extraction.extraction.exam_information
 
     extracted_exam_name = (
         information.exam_name
@@ -2504,24 +1990,18 @@ def _discover_exam_once(
             "AI extraction did not identify a conducting body."
         )
 
-    # --------------------------------------------------------
     # 5. Database transaction
-    # --------------------------------------------------------
 
-    _log(
-        "DATABASE PERSISTENCE START"
-    )
+    _log("DATABASE PERSISTENCE START")
 
     with SessionLocal() as db:
 
         try:
 
-            conducting_body = (
-                _get_or_create_conducting_body(
-                    db=db,
-                    body_name=conducting_body_name,
-                    official_url=official_url,
-                )
+            conducting_body = _get_or_create_conducting_body(
+                db=db,
+                body_name=conducting_body_name,
+                official_url=official_url,
             )
 
             exam = _get_or_create_exam(
@@ -2531,95 +2011,56 @@ def _discover_exam_once(
                 official_url=official_url,
             )
 
-            notification = (
-                _create_official_notification(
-                    db=db,
-                    exam=exam,
-                    official_url=official_url,
-                    pdf_path=str(pdf_path),
-                    extraction=extraction,
-                )
+            notification = _create_official_notification(
+                db=db,
+                exam=exam,
+                official_url=official_url,
+                pdf_path=str(pdf_path),
+                extraction=extraction,
             )
 
-            pending_extraction = (
-                _create_pending_extraction(
-                    db=db,
-                    notification=notification,
-                    pdf_path=str(pdf_path),
-                    extraction=extraction,
-                )
+            pending_extraction = _create_pending_extraction(
+                db=db,
+                notification=notification,
+                pdf_path=str(pdf_path),
+                extraction=extraction,
             )
 
             db.commit()
 
-            db.refresh(
-                pending_extraction
-            )
+            db.refresh(pending_extraction)
+            db.refresh(notification)
+            db.refresh(exam)
 
-            db.refresh(
-                notification
-            )
-
-            db.refresh(
-                exam
-            )
-
-            _log(
-                "DATABASE PERSISTENCE COMPLETE"
-            )
-
-            _log(
-                "PIPELINE COMPLETE: PENDING"
-            )
+            _log("DATABASE PERSISTENCE COMPLETE")
+            _log("PIPELINE COMPLETE: PENDING")
 
             return {
-                "id": (
-                    pending_extraction.extraction_id
-                ),
-                "extraction_id": (
-                    pending_extraction.extraction_id
-                ),
-                "notification_id": (
-                    notification.notification_id
-                ),
-                "exam_id": (
-                    exam.exam_id
-                ),
-                "exam_name": (
-                    exam.name
-                ),
-                "official_url": (
-                    official_url
-                ),
-                "pdf_path": (
-                    str(pdf_path)
-                ),
-                "status": (
-                    pending_extraction.extraction_status
-                ),
-                "approval_status": (
-                    notification.approval_status
-                ),
+                "id": pending_extraction.extraction_id,
+                "extraction_id": pending_extraction.extraction_id,
+                "notification_id": notification.notification_id,
+                "exam_id": exam.exam_id,
+                "exam_name": exam.name,
+                "official_url": official_url,
+                "pdf_path": str(pdf_path),
+                "status": pending_extraction.extraction_status,
+                "approval_status": notification.approval_status,
             }
 
         except Exception as error:
 
             db.rollback()
 
-            _log(
-                f"DATABASE PERSISTENCE FAILED: {error}"
-            )
+            _log(f"DATABASE PERSISTENCE FAILED: {error}")
 
-            if isinstance(
-                error,
-                ExamDiscoveryError,
-            ):
+            if isinstance(error, ExamDiscoveryError):
                 raise
 
-            raise ExamDiscoveryError(
+            raise DiscoveryPersistenceError(
                 "The discovered examination data could not "
                 "be persisted safely."
             ) from error
+
 
 # ============================================================
 # DUPLICATE DISCOVERY REQUEST COALESCING
@@ -2648,9 +2089,7 @@ def discover_exam(
     key = _discovery_key(exam_name)
 
     if not key:
-        raise ValueError(
-            "Exam name cannot be empty."
-        )
+        raise ValueError("Exam name cannot be empty.")
 
     with _DISCOVERY_JOBS_LOCK:
         job = _DISCOVERY_JOBS.get(key)
@@ -2684,9 +2123,7 @@ def discover_exam(
         return dict(job["result"])
 
     try:
-        result = _discover_exam_once(
-            exam_name
-        )
+        result = _discover_exam_once(exam_name)
 
         with _DISCOVERY_JOBS_LOCK:
             job["result"] = result
@@ -2704,6 +2141,8 @@ def discover_exam(
         with _DISCOVERY_JOBS_LOCK:
             if _DISCOVERY_JOBS.get(key) is job:
                 del _DISCOVERY_JOBS[key]
+
+
 def _parse_extracted_date(value: str | None, field_name: str) -> date | None:
     """Parse an extracted ISO date into a database date."""
 
