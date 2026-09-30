@@ -8,11 +8,18 @@ export default function ConflictPanel({ conflicts = [] }) {
         <AlertTriangle size={18} />
         <h2 className="font-display text-base font-semibold">Conflict Detected</h2>
       </div>
-      <p className="mt-1 text-sm text-red-600">Administrator review required — the system will not select one value automatically.</p>
+      <p className="mt-1 text-sm text-red-600">The document gives more than one value. A provisional value was chosen — verify it against the source before approving.</p>
       <div className="mt-4 flex flex-col gap-4">
         {conflicts.map((conflict, i) => (
           <div key={i}>
-            <p className="text-sm font-medium text-ink">{conflict.field}</p>
+            <p className="text-sm font-medium text-ink">
+              {conflict.field}
+              {conflict.chosen && (
+                <span className="ml-2 text-xs font-normal text-slate-500">
+                  provisionally using: <span className="font-mono">{conflict.chosen}</span>
+                </span>
+              )}
+            </p>
             <div className="mt-2 grid gap-2 sm:grid-cols-2">
               {conflict.options.map((opt, j) => (
                 <div key={j} className="rounded-xl border border-red-200 bg-slate-50 p-3">

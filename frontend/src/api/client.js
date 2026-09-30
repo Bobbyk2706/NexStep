@@ -21,10 +21,13 @@ export function setToken(token) {
 }
 
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, extra = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = extra.code ?? null;
+    this.officialUrl = extra.officialUrl ?? null;
+    this.pagesChecked = extra.pagesChecked ?? null;
   }
 }
 
@@ -94,17 +97,34 @@ export function createClient({
       }
     }
 
-    if (!res.ok) {
+        if (!res.ok) {
       let message = `Request failed (${res.status})`;
+      let extra = {};
 
       try {
         const data = await res.json();
-        message = data?.detail || data?.message || data?.error || message;
+        const d = data?.detail;
+
+        if (typeof d === "string") {
+          message = d;
+        } else if (Array.isArray(d)) {
+          // FastAPI validation errors: [{ loc, msg, type }, ...]
+          message = d.map((item) => item?.msg).filter(Boolean).join("; ") || message;
+        } else if (d && typeof d === "object") {
+          message = d.message || message;
+          extra = {
+            code: d.code,
+            officialUrl: d.official_url,
+            pagesChecked: d.pages_checked,
+          };
+        } else {
+          message = data?.message || data?.error || message;
+        }
       } catch {
         // Keep the generic message for non-JSON responses.
       }
 
-      throw new ApiError(message, res.status);
+      throw new ApiError(message, res.status, extra);
     }
 
     if (res.status === 204) {

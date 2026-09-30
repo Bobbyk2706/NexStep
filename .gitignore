@@ -1,6 +1,9 @@
 # Environment variables
 .env
-NexStep_backup.dump
+.env.example
+  .env
+  backend/.env
+  backend/storage/
 
 # Python cache
 __pycache__/

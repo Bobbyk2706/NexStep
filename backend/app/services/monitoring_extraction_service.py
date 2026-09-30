@@ -7,21 +7,7 @@ import pymupdf
 from app.ai.aggregated_extraction_result import (
     AggregatedExtractionResult,
 )
-from app.ai.chunk_aggregator import (
-    aggregate_chunk_extractions,
-)
-from app.ai.parallel_chunk_extraction import (
-    extract_chunks_in_parallel,
-)
-from app.ai.complete_extraction_normalizer import (
-    normalize_complete_extraction,
-)
-from app.ai.complete_extraction_validation import (
-    validate_complete_extraction,
-)
-from app.services.document_chunker import (
-    chunk_document_pages,
-)
+from app.ai.extraction.pipeline import run_extraction
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -179,92 +165,23 @@ def extract_new_monitoring_document(
     )
 
     # --------------------------------------------------------
-    # 2. Extract every PDF page
+    # 2. Extraction (pipeline v2)
     # --------------------------------------------------------
 
-    pages = extract_monitoring_pdf_pages(
-        pdf_content
+    normalized_result = run_extraction(
+        pdf_content,
+        document_hash=document_hash,
     )
 
-    # --------------------------------------------------------
-    # 3. Lossless chunking
-    # --------------------------------------------------------
-
-    chunks = chunk_document_pages(
-        pages,
-        chunk_size=16000,
-    )
-
-    if not chunks:
-        raise ValueError(
-            "No document chunks were produced."
-        )
-
-    # --------------------------------------------------------
-    # 4. AI extraction for every chunk
-    # --------------------------------------------------------
-
-    try:
-        chunk_results = extract_chunks_in_parallel(chunks)
-
-    except Exception as error:
-        raise ValueError(
-            f"AI extraction failed on one or more chunks: {error}"
-        ) from error
-
-    if not chunk_results:
-        raise ValueError(
-            "No chunk extraction results were produced."
-        )
-
-    # --------------------------------------------------------
-    # 5. Conservative aggregation
-    # --------------------------------------------------------
-
-    try:
-        aggregated_result = (
-            aggregate_chunk_extractions(
-                chunk_results
-            )
-        )
-
-    except ValueError as error:
-        raise ValueError(
-            "Monitoring extraction could not be safely "
-            f"aggregated: {error}"
-        ) from error
-
-    # --------------------------------------------------------
-    # 6. Normalization
-    # --------------------------------------------------------
-
-    normalized_extraction = (
-        normalize_complete_extraction(
-            aggregated_result.extraction
-        )
-    )
-
-    normalized_result = (
-        AggregatedExtractionResult(
-            extraction=normalized_extraction,
-            evidence=aggregated_result.evidence,
-        )
-    )
-
-    # --------------------------------------------------------
-    # 7. Validation
-    # --------------------------------------------------------
-
-    validation_errors = (
-        validate_complete_extraction(
-            normalized_extraction
-        )
-    )
-
-    if validation_errors:
+    # An automatic run must never raise a change alert from a
+    # half-understood document, so blocking issues abort it.
+    if normalized_result.blocking_issues:
         raise ValueError(
             "Monitoring extraction failed validation: "
-            f"{validation_errors}"
+            + "; ".join(
+                issue.message
+                for issue in normalized_result.blocking_issues
+            )
         )
 
     # --------------------------------------------------------
