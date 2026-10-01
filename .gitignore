@@ -21,3 +21,10 @@ Thumbs.db
 node_modules/
 # Python packaging
 *.egg-info/
+# Runtime files
+storage/
+#test file
+
+package-lock.json
+admin_tool.Py
+test_section_detector.py

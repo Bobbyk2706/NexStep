@@ -19,9 +19,9 @@ load_dotenv()
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-DEFAULT_MODEL = os.getenv(
-    "OPENROUTER_MODEL",
-    "openrouter/free",
+DEFAULT_MODEL = (
+    os.getenv("OPENROUTER_MODEL", "").strip()
+    or "openrouter/free"
 )
 
 MAX_RETRIES = 2

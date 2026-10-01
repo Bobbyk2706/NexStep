@@ -12,6 +12,7 @@ from app.models.official_notification import OfficialNotification
 from app.models.eligibility_rule_group import EligibilityRuleGroup
 from app.models.eligibility_rule import EligibilityRule
 from app.services.rule_evaluator import evaluate_rule
+from app.services.text_matching import canonical_text
 
 
 # ============================================================
@@ -587,6 +588,12 @@ def check_rule(
         rule,
         student_value,
     )
+
+    # Free-text values ("Indian" vs "India", "bachelors" vs
+    # "Bachelor's") are compared in canonical form.
+    if isinstance(student_value, str) and isinstance(rule_value, str):
+        student_value = canonical_text(student_value)
+        rule_value = canonical_text(rule_value)
 
     try:
         return evaluate_rule(

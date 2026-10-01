@@ -12,6 +12,7 @@ function Field({ label, value }) {
 
 export default function ExamInfoCard({ examName, info }) {
   if (!info) return null;
+
   return (
     <Card>
       <h2 className="mb-4 font-mono text-xs uppercase tracking-wide text-slate-400">Exam Information</h2>
@@ -24,9 +25,16 @@ export default function ExamInfoCard({ examName, info }) {
         <div>
           <p className="text-xs text-slate-400">Examination Dates</p>
           <div className="mt-0.5 flex flex-col gap-0.5">
-            {(info.examDates || []).length === 0 && <p className="text-sm font-medium text-ink">Not specified</p>}
-            {(info.examDates || []).map((d, i) => (
-              <p key={i} className="text-sm font-medium text-ink">{formatDate(d)}</p>
+            {(info.examDates || []).length === 0 && (
+              <p className="text-sm font-medium text-ink">Not specified</p>
+            )}
+            {(info.examDates || []).map((dateRange, index) => (
+              <p key={index} className="text-sm font-medium text-ink">
+                {formatDate(dateRange.startDate)}
+                {dateRange.endDate && dateRange.endDate !== dateRange.startDate
+                  ? ` – ${formatDate(dateRange.endDate)}`
+                  : ""}
+              </p>
             ))}
           </div>
         </div>

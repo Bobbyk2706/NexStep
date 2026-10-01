@@ -9,28 +9,35 @@ export function NotificationsProvider({ children }) {
   const [notifications, setNotifications] = useState([]);
 
   const refresh = useCallback(async () => {
+    if (!user) {
+      setNotifications([]);
+      return;
+    }
+
     const data = await notificationsApi.getNotifications();
-    setNotifications(data);
-  }, []);
+    setNotifications(data || []);
+  }, [user]);
 
   useEffect(() => {
-    if (user) refresh();
-  }, [user, refresh]);
+    refresh().catch(() => setNotifications([]));
+  }, [refresh]);
 
   async function markRead(id) {
     const updated = await notificationsApi.markAsRead(id);
-    setNotifications(updated);
+    setNotifications(updated || []);
   }
 
   async function markAllRead() {
     const updated = await notificationsApi.markAllAsRead();
-    setNotifications(updated);
+    setNotifications(updated || []);
   }
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
-    <NotificationsContext.Provider value={{ notifications, unreadCount, refresh, markRead, markAllRead }}>
+    <NotificationsContext.Provider
+      value={{ notifications, unreadCount, refresh, markRead, markAllRead }}
+    >
       {children}
     </NotificationsContext.Provider>
   );

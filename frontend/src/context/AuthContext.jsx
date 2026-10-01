@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import * as authApi from "../api/auth";
 import * as profileApi from "../api/profile";
-import { getToken } from "../api/client";
+import { getToken, onSessionExpired } from "../api/client";
 
 const AuthContext = createContext(null);
 
@@ -11,38 +11,65 @@ export function AuthProvider({ children }) {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
-    // On reload, a real backend call would be GET /auth/me using the stored
-    // token. Here we just check whether a profile was saved this session.
-    async function restore() {
-      const token = getToken();
-      if (token) {
-        const profile = await profileApi.getProfile();
-        setUser({ name: profile?.name || "Student", email: "you@nexstep.app" });
+    let mounted = true;
+
+    async function restoreSession() {
+      try {
+        if (!getToken()) return;
+
+        const [currentUser, profile] = await Promise.all([
+          authApi.getCurrentUser(),
+          profileApi.getProfile(),
+        ]);
+
+        if (!mounted) return;
+
+        setUser(currentUser);
         setHasProfile(Boolean(profile));
+      } catch {
+        if (!mounted) return;
+        setUser(null);
+        setHasProfile(false);
+      } finally {
+        if (mounted) setChecking(false);
       }
-      setChecking(false);
     }
-    restore();
+
+    restoreSession();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return onSessionExpired(() => {
+      setUser(null);
+      setHasProfile(false);
+    });
   }, []);
 
   async function login(credentials) {
     const res = await authApi.login(credentials);
-    setUser(res.user);
-    setHasProfile(res.hasProfile);
+    setUser(res.user || null);
+    setHasProfile(Boolean(res.hasProfile));
     return res;
   }
 
   async function signup(details) {
     const res = await authApi.signup(details);
-    setUser(res.user);
-    setHasProfile(res.hasProfile);
+    setUser(res.user || null);
+    setHasProfile(Boolean(res.hasProfile));
     return res;
   }
 
-  function logout() {
-    authApi.logout();
-    setUser(null);
-    setHasProfile(false);
+  async function logout() {
+    try {
+      await authApi.logout();
+    } finally {
+      setUser(null);
+      setHasProfile(false);
+    }
   }
 
   function markProfileComplete() {
@@ -51,7 +78,15 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, hasProfile, checking, login, signup, logout, markProfileComplete }}
+      value={{
+        user,
+        hasProfile,
+        checking,
+        login,
+        signup,
+        logout,
+        markProfileComplete,
+      }}
     >
       {children}
     </AuthContext.Provider>

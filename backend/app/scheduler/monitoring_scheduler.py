@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import logging
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.background import (
+    BackgroundScheduler,
+)
 from sqlalchemy import select
 
+from app.ai.llm_client import (
+    analyze_monitoring_semantic_changes,
+)
 from app.database.session import SessionLocal
-from app.models.official_notification import OfficialNotification
-from app.services.exam_monitoring_service import (
-    monitor_notification,
+from app.models.official_notification import (
+    OfficialNotification,
+)
+from app.services.monitoring_pipeline_service import (
+    run_monitoring_pipeline,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================================
-# SCHEDULER
-# ============================================================
 
 scheduler = BackgroundScheduler()
 
@@ -25,26 +27,27 @@ scheduler = BackgroundScheduler()
 # APPROVED NOTIFICATIONS
 # ============================================================
 
-
 def get_approved_notification_ids() -> list[int]:
     """
-    Return the IDs of all approved official notifications.
-
-    Only APPROVED notifications are eligible for automatic
-    monitoring.
+    Return approved official notifications that have enough
+    document information for monitoring.
     """
 
     with SessionLocal() as db:
-
         statement = (
-    select(OfficialNotification.notification_id)
-    .where(
-        OfficialNotification.approval_status == "APPROVED",
-        OfficialNotification.document_url.is_not(None),
-        OfficialNotification.document_hash.is_not(None),
-    )
-    .order_by(OfficialNotification.notification_id)
-)
+            select(
+                OfficialNotification.notification_id
+            )
+            .where(
+                OfficialNotification.approval_status
+                == "APPROVED",
+                OfficialNotification.document_url.is_not(None),
+                OfficialNotification.document_hash.is_not(None),
+            )
+            .order_by(
+                OfficialNotification.notification_id
+            )
+        )
 
         return list(
             db.scalars(statement).all()
@@ -52,18 +55,77 @@ def get_approved_notification_ids() -> list[int]:
 
 
 # ============================================================
+# SAFE API RESULT
+# ============================================================
+
+def _build_safe_monitoring_result(
+    result: dict,
+) -> dict:
+    """
+    Convert the detailed monitoring result into a small
+    JSON-safe API response.
+
+    Never expose PDF bytes or full extraction content.
+    """
+
+    return {
+        "notification_id": result.get(
+            "notification_id"
+        ),
+        "status": result.get("status"),
+        "changed": result.get(
+            "changed",
+            False,
+        ),
+        "review_id": result.get(
+            "review_id"
+        ),
+        "previous_hash": result.get(
+            "previous_hash"
+        ),
+        "current_hash": result.get(
+            "current_hash"
+        ),
+        "change_count": result.get(
+            "change_count"
+        ),
+        "requires_human_review": result.get(
+            "requires_human_review"
+        ),
+        "requires_eligibility_re_evaluation": result.get(
+            "requires_eligibility_re_evaluation"
+        ),
+    }
+
+
+# ============================================================
 # MONITORING CYCLE
 # ============================================================
 
-
 def run_monitoring_cycle() -> dict:
     """
-    Execute one monitoring cycle.
+    Run the complete monitoring pipeline for every approved
+    official notification.
 
-    Every approved notification is monitored independently.
+    Flow:
 
-    A failure for one notification does not stop the
-    remaining notifications from being processed.
+        official document
+              ↓
+        hash comparison
+              ↓
+          NO_CHANGE
+              ↓
+        CHANGE_DETECTED
+              ↓
+        new extraction
+              ↓
+        structural comparison
+              ↓
+        AI semantic analysis
+              ↓
+        impact classification
+              ↓
+        MonitoringReview(PENDING)
     """
 
     logger.info(
@@ -79,21 +141,30 @@ def run_monitoring_cycle() -> dict:
     for notification_id in notification_ids:
 
         try:
+            result = run_monitoring_pipeline(
+                notification_id=notification_id,
+                analyzer=(
+                    analyze_monitoring_semantic_changes
+                ),
+            )
 
-            result = monitor_notification(
-                notification_id=notification_id
+            safe_result = (
+                _build_safe_monitoring_result(
+                    result
+                )
             )
 
             results.append(
                 {
                     "notification_id": notification_id,
                     "status": "SUCCESS",
-                    "result": result,
+                    "result": safe_result,
                 }
             )
 
             logger.info(
-                "Monitoring completed for notification %s: %s",
+                "Monitoring completed for notification "
+                "%s: %s",
                 notification_id,
                 result.get("status"),
             )
@@ -140,19 +211,10 @@ def run_monitoring_cycle() -> dict:
 
 
 # ============================================================
-# SCHEDULER START
+# AUTOMATIC SCHEDULER
 # ============================================================
 
-
 def start_monitoring_scheduler() -> None:
-    """
-    Start the monitoring scheduler.
-
-    The monitoring cycle runs once every 24 hours.
-
-    Calling this function multiple times does not create
-    duplicate scheduler instances.
-    """
 
     if scheduler.running:
         logger.info(
@@ -177,15 +239,7 @@ def start_monitoring_scheduler() -> None:
     )
 
 
-# ============================================================
-# SCHEDULER STOP
-# ============================================================
-
-
 def stop_monitoring_scheduler() -> None:
-    """
-    Stop the monitoring scheduler safely.
-    """
 
     if not scheduler.running:
         logger.info(
@@ -203,21 +257,14 @@ def stop_monitoring_scheduler() -> None:
 
 
 # ============================================================
-# MANUAL EXECUTION
+# MANUAL RUN
 # ============================================================
-
 
 def run_monitoring_cycle_now() -> dict:
     """
-    Execute one monitoring cycle immediately.
+    Run monitoring immediately.
 
-    This is useful for:
-        - development
-        - testing
-        - demonstrations
-        - manually triggering monitoring
-
-    It does not modify the scheduler configuration.
+    Used by the admin dashboard.
     """
 
     return run_monitoring_cycle()

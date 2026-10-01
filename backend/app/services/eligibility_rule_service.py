@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai.eligibility_schemas import (
@@ -18,6 +18,65 @@ SUPPORTED_LOGICAL_OPERATORS = {
     "AND",
     "OR",
 }
+
+
+def _normalize_attribute_name(
+    attribute_name: str,
+) -> str:
+    """
+    Normalize an eligibility attribute name for lookup.
+
+    This keeps extraction output independent of database
+    capitalization and accidental whitespace.
+
+    Examples:
+
+        "Nationality" -> "nationality"
+        " nationality " -> "nationality"
+        "Date   of   Birth" -> "date of birth"
+        "CGPA" -> "cgpa"
+    """
+
+    return " ".join(
+        str(attribute_name).strip().lower().split()
+    )
+
+
+def _find_eligibility_attribute(
+    session: Session,
+    attribute_name: str,
+) -> EligibilityAttribute | None:
+    """
+    Find an eligibility attribute using normalized matching.
+
+    AI extraction may return:
+
+        Nationality
+        nationality
+        NATIONALITY
+        " Nationality "
+
+    The database should not require the AI to reproduce the
+    exact capitalization or whitespace used by the seed data.
+    """
+
+    normalized_name = _normalize_attribute_name(
+        attribute_name
+    )
+
+    if not normalized_name:
+        return None
+
+    return session.scalar(
+        select(EligibilityAttribute).where(
+            func.lower(
+                func.trim(
+                    EligibilityAttribute.attribute_name
+                )
+            )
+            == normalized_name
+        )
+    )
 
 
 def create_rule(
@@ -73,7 +132,11 @@ def _create_rule_group_recursive(
     preserved exactly.
     """
 
-    logical_operator = group_data.logical_operator.strip().upper()
+    logical_operator = (
+        group_data.logical_operator
+        .strip()
+        .upper()
+    )
 
     if logical_operator not in SUPPORTED_LOGICAL_OPERATORS:
         raise ValueError(
@@ -97,11 +160,9 @@ def _create_rule_group_recursive(
 
     for rule_data in group_data.rules:
 
-        attribute = session.scalar(
-            select(EligibilityAttribute).where(
-                EligibilityAttribute.attribute_name
-                == rule_data.attribute
-            )
+        attribute = _find_eligibility_attribute(
+            session=session,
+            attribute_name=rule_data.attribute,
         )
 
         if attribute is None:

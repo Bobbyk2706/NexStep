@@ -2,23 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 
-import pymupdf
 from sqlalchemy.orm import Session
 
-from app.ai.aggregated_extraction_result import (
-    AggregatedExtractionResult,
-)
-from app.ai.chunk_aggregator import (
-    aggregate_chunk_extractions,
-)
-from app.ai.parallel_chunk_extraction import (
-    extract_chunks_in_parallel,
-)
-from app.ai.complete_extraction_normalizer import (
-    normalize_complete_extraction,
-)
-from app.ai.complete_extraction_validation import (
-    validate_complete_extraction,
+from app.ai.extraction.pipeline import (
+    ensure_usable,
+    run_extraction,
+    summarize,
 )
 from app.ai.extraction_serialization import (
     serialize_aggregated_extraction,
@@ -27,9 +16,6 @@ from app.ai.source_verification import (
     verify_exam_source,
 )
 from app.database.session import SessionLocal
-from app.services.document_chunker import (
-    chunk_document_pages,
-)
 from app.services.exam_discovery_service import (
     crawl_exam_sources,
 )
@@ -149,139 +135,32 @@ def process_exam(
         )
 
     # ========================================================
-    # 4. EXTRACT PDF PAGES
+    # 4-9. AI EXTRACTION (pipeline v2)
     # ========================================================
+    #
+    # parse -> passages -> targeted retrieval -> LLM facts
+    #       -> grounding in the source -> rule compilation
+    #       -> normalization -> validation
+    #
+    # Problems found on the way are recorded as issues on the
+    # result and shown to the reviewer, instead of aborting.
 
     try:
-        document = pymupdf.open(
-            stream=pdf_content,
-            filetype="pdf",
+        normalized_result = run_extraction(
+            pdf_content,
+            exam_name_hint=exam_name,
+            source_url=document_url,
+            document_hash=document_hash,
         )
+        ensure_usable(normalized_result)
 
-        pages = [
-            page.get_text()
-            for page in document
-        ]
-
-        document.close()
+    except ValueError:
+        raise
 
     except Exception as error:
         raise ValueError(
-            "Failed to extract text from selected PDF."
+            f"AI extraction failed: {error}"
         ) from error
-
-    if not pages:
-        raise ValueError(
-            "Selected PDF contains no pages."
-        )
-
-    if not any(
-        page.strip()
-        for page in pages
-    ):
-        raise ValueError(
-            "Selected PDF contains no extractable text."
-        )
-
-    # ========================================================
-    # 5. LOSSLESS CHUNKING
-    # ========================================================
-
-    chunks = chunk_document_pages(
-        pages,
-        chunk_size=30000,
-    )
-
-    if not chunks:
-        raise ValueError(
-            "No document chunks were produced."
-        )
-
-    # ========================================================
-    # 6. AI EXTRACTION — EVERY CHUNK
-    # ========================================================
-
-    try:
-        chunk_results = extract_chunks_in_parallel(chunks)
-
-    except Exception as error:
-        raise ValueError(
-            f"AI extraction failed on one or more chunks: {error}"
-        ) from error
-
-    if not chunk_results:
-        raise ValueError(
-            "No chunk extraction results were produced."
-        )
-
-    # ========================================================
-    # 7. CONSERVATIVE AGGREGATION
-    # ========================================================
-
-    try:
-        aggregated_result = (
-            aggregate_chunk_extractions(
-                chunk_results
-            )
-        )
-
-    except ValueError as error:
-        raise ValueError(
-            "Extraction could not be safely aggregated: "
-            f"{error}"
-        ) from error
-
-    print("\n--- AGGREGATED EXTRACTION ---")
-
-    print(
-        aggregated_result.extraction.model_dump_json(
-            indent=2
-        )
-    )
-
-    print("\n--- EVIDENCE ---")
-
-    for evidence in aggregated_result.evidence:
-        print(
-            f"\nChunk: {evidence.chunk_number}"
-        )
-
-        print(
-            f"Pages: {evidence.page_numbers}"
-        )
-
-    # ========================================================
-    # 8. NORMALIZATION
-    # ========================================================
-
-    normalized_extraction = (
-        normalize_complete_extraction(
-            aggregated_result.extraction
-        )
-    )
-
-    normalized_result = (
-        AggregatedExtractionResult(
-            extraction=normalized_extraction,
-            evidence=aggregated_result.evidence,
-        )
-    )
-
-    # ========================================================
-    # 9. VALIDATION
-    # ========================================================
-
-    validation_errors = (
-        validate_complete_extraction(
-            normalized_extraction
-        )
-    )
-
-    if validation_errors:
-        raise ValueError(
-            "Complete extraction failed validation: "
-            f"{validation_errors}"
-        )
 
     # ========================================================
     # 10. EXAM INFORMATION
@@ -366,7 +245,7 @@ def process_exam(
                             normalized_result
                         )
                     ),
-                    ai_summary=None,
+                    ai_summary=summarize(normalized_result),
                     change_detected=False,
                     change_details=None,
                     extraction_status="PENDING",

@@ -1,25 +1,46 @@
-import { mockDelay } from "./client";
-import { mockNotifications } from "./mockData";
+import { request } from "./client";
 
-let notifications = [...mockNotifications];
+function normalizeType(value) {
+  const type = String(value || "").toUpperCase();
+
+  if (type.includes("DEADLINE")) return "deadline";
+  if (type.includes("ELIGIBLE")) return "new-eligible";
+  if (type.includes("EXAM")) return "exam";
+  return "update";
+}
+
+function normalizeNotification(notification) {
+  return {
+    ...notification,
+    id: notification.notification_id,
+    type: normalizeType(notification.notification_type),
+    read: Boolean(notification.is_read),
+    timestamp: notification.created_at,
+    examId: notification.exam_id,
+  };
+}
 
 export async function getNotifications() {
-  await mockDelay(200);
-  return [...notifications].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  // Real version:
-  // return request("/notifications");
+  const data = await request("/notifications");
+  return (data || []).map(normalizeNotification);
 }
 
 export async function markAsRead(id) {
-  await mockDelay(100);
-  notifications = notifications.map((n) => (n.id === id ? { ...n, read: true } : n));
-  return notifications;
-  // Real version:
-  // return request(`/notifications/${id}/read`, { method: "POST" });
+  if (id === undefined || id === null || id === "") {
+    throw new Error("Notification ID is required.");
+  }
+
+  await request(`/notifications/${encodeURIComponent(id)}/read`, {
+    method: "POST",
+  });
+
+  return getNotifications();
 }
 
 export async function markAllAsRead() {
-  await mockDelay(150);
-  notifications = notifications.map((n) => ({ ...n, read: true }));
-  return notifications;
+  await request("/notifications/read-all", {
+    method: "POST",
+  });
+
+  return getNotifications();
 }

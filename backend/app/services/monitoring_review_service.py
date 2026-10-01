@@ -223,10 +223,10 @@ def create_monitoring_review(
             notification_id=notification_id,
             old_document_hash=old_document_hash,
             new_document_hash=new_document_hash,
-            old_extraction=_serialize(
-                old_extraction
+            old_extraction=_serialize_extraction(
+               old_extraction
             ),
-            new_extraction=_serialize(
+            new_extraction=_serialize_extraction(
                 new_extraction
             ),
             structural_changes=_serialize(

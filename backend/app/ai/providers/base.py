@@ -30,6 +30,20 @@ class AIProviderUnavailableError(AIProviderError):
     """
 
 
+class AIProviderRateLimitError(AIProviderUnavailableError):
+    """
+    Raised when the provider itself answered HTTP 429.
+
+    `retry_after` is the number of seconds the provider asked us to
+    back off (0 when it did not say). The provider manager feeds it to
+    the token bucket so following requests wait instead of failing.
+    """
+
+    def __init__(self, message: str, *, retry_after: float = 0.0) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class AIProviderResponseError(AIProviderError):
     """
     Raised when the provider returns an unusable response.

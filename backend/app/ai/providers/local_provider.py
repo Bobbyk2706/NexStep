@@ -29,7 +29,7 @@ DEFAULT_HOST = os.getenv(
 DEFAULT_TIMEOUT = float(
     os.getenv(
         "NEXSTEP_LOCAL_AI_TIMEOUT_SECONDS",
-        "90",
+        "540",
     )
 )
 
@@ -99,12 +99,23 @@ class LocalProvider(AIProvider):
 
         client = self._get_client()
 
+        from app.ai.token_budget import estimate_tokens
+
+        # Ollama silently truncates prompts longer than num_ctx (default
+        # 2048-4096). Size the window to the actual request.
+        needed = estimate_tokens(messages, response_schema) + (
+            max_tokens or 1024
+        ) + 256
+
         request_kwargs: dict[str, Any] = {
             "model": selected_model,
             "messages": messages,
             "options": {
                 "temperature": temperature,
+                "num_ctx": min(max(needed, 4096), 32768),
             },
+            # Structured output does not need chain-of-thought tokens.
+            "think": False,
         }
 
         if max_tokens is not None:
@@ -114,9 +125,12 @@ class LocalProvider(AIProvider):
             request_kwargs["format"] = response_schema
 
         try:
-            response = client.chat(
-                **request_kwargs
-            )
+            try:
+                response = client.chat(**request_kwargs)
+            except TypeError:
+                # Older ollama client without the `think` argument.
+                request_kwargs.pop("think", None)
+                response = client.chat(**request_kwargs)
         except Exception as exc:
             raise AIProviderUnavailableError(
                 f"Local Ollama provider failed to generate a response: {exc!r}"

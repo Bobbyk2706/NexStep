@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from typing import TypeVar
 from app.ai.aggregated_extraction_result import (
     AggregatedExtractionResult,
 )
@@ -17,7 +17,13 @@ from app.ai.eligibility_schemas import (
 )
 
 
-def _merge_unique[T](items: list[T]) -> list[T]:
+
+
+
+T = TypeVar("T")
+
+
+def _merge_unique(items: list[T]) -> list[T]:
     """
     Preserve order while removing exact duplicates.
     """
