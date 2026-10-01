@@ -14,6 +14,7 @@ from app.routers.profile_router import router as profile_router
 from app.routers.notification_router import router as notification_router
 from app.routers.tracked_exam_router import router as tracked_exam_router
 from app.logging_config import setup_logging
+from app.routers import admin_monitoring
 
 setup_logging()
 
@@ -34,6 +35,11 @@ app.add_middleware(
 
 app.include_router(
     auth_router,
+    prefix="/api",
+)
+
+app.include_router(
+    admin_monitoring.router,
     prefix="/api",
 )
 

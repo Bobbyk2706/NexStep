@@ -1811,12 +1811,22 @@ def _create_official_notification(
     db,
     exam: Exam,
     official_url: str,
+    document_url: str,
+    document_hash: str,
     pdf_path: str,
     extraction: AggregatedExtractionResult,
 ) -> OfficialNotification:
 
     information = extraction.extraction.exam_information
+    if not document_url:
+        raise ValueError(
+            "Cannot create official notification without document URL."
+        )
 
+    if not document_hash:
+        raise ValueError(
+            "Cannot create official notification without document hash."
+        )
     notification = OfficialNotification(
         exam_id=exam.exam_id,
         title=(
@@ -1828,6 +1838,8 @@ def _create_official_notification(
         application_start_date=information.application_start_date,
         application_end_date=information.application_end_date,
         official_url=official_url,
+        document_url=document_url,
+        document_hash=document_hash,
         pdf_path=pdf_path,
         ai_summary=(
             "AI-discovered official examination "
@@ -2012,12 +2024,14 @@ def _discover_exam_once(
             )
 
             notification = _create_official_notification(
-                db=db,
-                exam=exam,
-                official_url=official_url,
-                pdf_path=str(pdf_path),
-                extraction=extraction,
-            )
+            db=db,
+            exam=exam,
+            official_url=official_url,
+            document_url=pdf.get("url") or official_url,
+            document_hash=pdf.get("document_hash") or "",
+            pdf_path=str(pdf_path),
+            extraction=extraction,
+        )
 
             pending_extraction = _create_pending_extraction(
                 db=db,

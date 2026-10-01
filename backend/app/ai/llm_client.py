@@ -5,7 +5,9 @@ from app.ai.provider_manager import (
     AIProviderManager,
     AllAIProvidersFailedError,
 )
-
+from app.ai.semantic_change_schemas import (
+    SemanticChangeAnalysis,
+)
 
 # ============================================================
 # PROVIDER MANAGER
@@ -151,6 +153,77 @@ ORIGINAL OFFICIAL DOCUMENT:
         raise RuntimeError(
             "Exam-information extraction returned an unexpected "
             "result type."
+        )
+
+    return result
+
+# ============================================================
+# MONITORING SEMANTIC CHANGE ANALYSIS
+# ============================================================
+
+def analyze_monitoring_semantic_changes(
+    prompt: str,
+) -> SemanticChangeAnalysis:
+    """
+    Analyze deterministic monitoring changes using the
+    configured AI provider chain.
+
+    Provider chain:
+
+        Groq -> OpenRouter -> Local Ollama
+
+    The deterministic structural comparison is authoritative.
+    The AI is only allowed to interpret the supplied changes.
+    """
+
+    response_schema = (
+        SemanticChangeAnalysis.model_json_schema()
+    )
+
+    def validate_response(
+        content: str,
+    ) -> SemanticChangeAnalysis:
+        return SemanticChangeAnalysis.model_validate_json(
+            content
+        )
+
+    try:
+        result = _provider_manager.generate(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict semantic change "
+                        "analysis system. Interpret only the "
+                        "deterministic changes supplied in the "
+                        "user prompt. Never invent changes."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            response_schema=response_schema,
+            validator=validate_response,
+            temperature=0.0,
+            max_tokens=4096,
+        )
+
+    except AllAIProvidersFailedError as exc:
+        raise RuntimeError(
+            "Monitoring semantic analysis failed because "
+            "all configured AI providers failed or returned "
+            "invalid structured data."
+        ) from exc
+
+    if not isinstance(
+        result,
+        SemanticChangeAnalysis,
+    ):
+        raise RuntimeError(
+            "Monitoring semantic analysis returned an "
+            "unexpected result type."
         )
 
     return result
