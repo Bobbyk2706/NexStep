@@ -1,9 +1,6 @@
 # Environment variables
 .env
-.env.example
-  .env
-  backend/.env
-  backend/storage/
+NexStep_backup.dump
 
 # Python cache
 __pycache__/
@@ -26,10 +23,7 @@ node_modules/
 *.egg-info/
 # Runtime files
 storage/
-#test files
-tests/
-test_login_selenium.py
-test_login.py
+#test file
 
 package-lock.json
 admin_tool.Py
