@@ -17,10 +17,12 @@ const emptyPreviousQualification = () => ({ level: "Bachelor's", institution: ""
 
 export default function ProfileSetup() {
   const navigate = useNavigate();
-  const { markProfileComplete } = useAuth();
+  const { markProfileComplete, user } = useAuth();
+
+  // The name was collected at signup, so it is not asked for again.
+  const firstName = (user?.name || "").trim().split(/\s+/)[0];
 
   const [form, setForm] = useState({
-    name: "",
     dob: "",
     nationality: "",
     state: "",
@@ -35,13 +37,13 @@ export default function ProfileSetup() {
   const [hasHigherQualification, setHasHigherQualification] = useState(false);
   const [previousQualification, setPreviousQualification] = useState(emptyPreviousQualification());
   const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     profileApi.getProfile().then((existing) => {
       if (!existing) return;
       setForm({
-        name: existing.name || "",
         dob: existing.dob || "",
         nationality: existing.nationality || "",
         state: existing.state || "",
@@ -55,6 +57,8 @@ export default function ProfileSetup() {
       if (existing.workExperience?.length) setWorkExperience(existing.workExperience);
       setHasHigherQualification(Boolean(existing.hasHigherQualification));
       if (existing.previousQualification) setPreviousQualification(existing.previousQualification);
+    }).catch(() => {
+      // A brand-new account has nothing to load yet.
     });
   }, []);
 
@@ -70,22 +74,19 @@ export default function ProfileSetup() {
     setWorkExperience((rows) => rows.map((row, i) => (i === index ? { ...row, [key]: value } : row)));
   }
 
+  // Only the personal details are required. Academic details are optional.
   function validate() {
     const next = {};
-    if (!form.name.trim()) next.name = "Required.";
     if (!form.dob) next.dob = "Required.";
     if (!form.nationality.trim()) next.nationality = "Required.";
     if (!form.state.trim()) next.state = "Required.";
-    if (!form.college.trim()) next.college = "Required.";
-    if (!form.branch.trim()) next.branch = "Required.";
-    if (!form.yearOfStudy) next.yearOfStudy = "Required.";
-    if (!form.cgpa && !form.percentage) next.cgpa = "Enter a CGPA or percentage.";
     setErrors(next);
     return Object.keys(next).length === 0;
   }
 
   async function handleSubmit(e) {
     e.preventDefault();
+    setFormError("");
     if (!validate()) return;
     setSaving(true);
     try {
@@ -98,6 +99,8 @@ export default function ProfileSetup() {
       });
       markProfileComplete();
       navigate("/dashboard");
+    } catch (err) {
+      setFormError(err?.message || "Could not save your profile. Please try again.");
     } finally {
       setSaving(false);
     }
@@ -111,18 +114,23 @@ export default function ProfileSetup() {
 
       <div className="mx-auto max-w-2xl px-6 py-10">
         <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
-          Build your profile
+          {firstName ? `Welcome, ${firstName}` : "Build your profile"}
         </h1>
         <p className="mt-2 text-slate-600">
           This is what NexStep checks against every exam's eligibility rules — the more complete, the
-          more accurate your matches.
+          more accurate your matches. Only your date of birth, nationality and state are required.
         </p>
 
         <form onSubmit={handleSubmit} noValidate className="mt-8 flex flex-col gap-6">
+          {formError && (
+            <p className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-amber-600 ring-1 ring-inset ring-amber-200">
+              {formError}
+            </p>
+          )}
+
           <Card className="flex flex-col gap-5">
             <h2 className="font-display text-base font-semibold text-ink">Personal details</h2>
             <div className="grid gap-5 sm:grid-cols-2">
-              <TextField id="name" label="Full name" required value={form.name} error={errors.name} onChange={(e) => updateField("name", e.target.value)} />
               <TextField id="dob" label="Date of birth" type="date" required value={form.dob} error={errors.dob} onChange={(e) => updateField("dob", e.target.value)} />
               <TextField id="nationality" label="Nationality" required value={form.nationality} error={errors.nationality} onChange={(e) => updateField("nationality", e.target.value)} />
               <TextField id="state" label="State" required value={form.state} error={errors.state} onChange={(e) => updateField("state", e.target.value)} />
@@ -130,12 +138,18 @@ export default function ProfileSetup() {
           </Card>
 
           <Card className="flex flex-col gap-5">
-            <h2 className="font-display text-base font-semibold text-ink">Academic details</h2>
+            <div>
+              <h2 className="font-display text-base font-semibold text-ink">Academic details</h2>
+              <p className="text-sm text-slate-500">
+                Optional — add them now or later. Exams that check academic details will show
+                "add this to your profile" until you do.
+              </p>
+            </div>
             <div className="grid gap-5 sm:grid-cols-2">
-              <TextField id="college" label="College" required value={form.college} error={errors.college} onChange={(e) => updateField("college", e.target.value)} />
-              <TextField id="branch" label="Branch" required value={form.branch} error={errors.branch} onChange={(e) => updateField("branch", e.target.value)} />
-              <SelectField id="yearOfStudy" label="Year of study" required value={form.yearOfStudy} error={errors.yearOfStudy} onChange={(e) => updateField("yearOfStudy", e.target.value)}>
-                <option value="" disabled>Select year</option>
+              <TextField id="college" label="College" value={form.college} error={errors.college} onChange={(e) => updateField("college", e.target.value)} />
+              <TextField id="branch" label="Branch" value={form.branch} error={errors.branch} onChange={(e) => updateField("branch", e.target.value)} />
+              <SelectField id="yearOfStudy" label="Year of study" value={form.yearOfStudy} error={errors.yearOfStudy} onChange={(e) => updateField("yearOfStudy", e.target.value)}>
+                <option value="">Select year</option>
                 {YEAR_OPTIONS.map((y) => (
                   <option key={y} value={y}>{y}</option>
                 ))}
@@ -203,7 +217,10 @@ export default function ProfileSetup() {
 
           <Card className="flex flex-col gap-5">
             <div className="flex items-center justify-between">
-              <h2 className="font-display text-base font-semibold text-ink">Educational qualifications</h2>
+              <div>
+                <h2 className="font-display text-base font-semibold text-ink">Educational qualifications</h2>
+                <p className="text-sm text-slate-500">Optional — blank rows are ignored.</p>
+              </div>
               <Button
                 type="button"
                 variant="secondary"

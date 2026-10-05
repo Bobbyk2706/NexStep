@@ -38,6 +38,7 @@ from app.services.approved_extraction_service import (
 from app.services.structural_change_detection_service import (
     StructuralChangeReport,
 )
+from app.services.notification_services import queue_exam_changed_notifications
 
 
 class MonitoringReviewError(RuntimeError):
@@ -728,6 +729,10 @@ def apply_approved_monitoring_review(
 
         if owns_session:
             db.commit()
+            queue_exam_changed_notifications(
+                notification.notification_id,
+                review.review_id,
+            )
 
         return review.review_id
 

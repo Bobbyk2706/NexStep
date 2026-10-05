@@ -13,3 +13,4 @@ from app.models.tracked_exam import TrackedExam
 from app.models.extraction_history import ExtractionHistory
 from app.models.audit_log import AuditLog
 from app.models.admin import Admin
+from app.models.pending_signup import PendingSignup  # noqa: F401

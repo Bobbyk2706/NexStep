@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,17 +16,41 @@ from app.routers.notification_router import router as notification_router
 from app.routers.tracked_exam_router import router as tracked_exam_router
 from app.logging_config import setup_logging
 from app.routers import admin_monitoring
+from app.routers.admin_notifications import router as admin_notifications_router
+from app.scheduler.notification_scheduler import (
+    start_notification_scheduler,
+    stop_notification_scheduler,
+)
+from contextlib import asynccontextmanager
+from app.routers.signup_verification_router import router as signup_verification_router
 
 setup_logging()
 
-app = FastAPI(title="NexStep API")
 
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_notification_scheduler()
+    try:
+        yield
+    finally:
+        stop_notification_scheduler()
+
+
+app = FastAPI(title="NexStep API", lifespan=lifespan)
+
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "http://localhost:5173",
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        FRONTEND_URL,
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -35,6 +60,11 @@ app.add_middleware(
 
 app.include_router(
     auth_router,
+    prefix="/api",
+)
+
+app.include_router(
+    signup_verification_router,
     prefix="/api",
 )
 
@@ -77,6 +107,9 @@ app.include_router(
     prefix="/api",
 )
 app.include_router(admin_discovery_router)
+
+app.include_router(admin_notifications_router)
+
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(

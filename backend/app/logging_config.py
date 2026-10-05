@@ -31,7 +31,7 @@ def setup_logging(level: int = logging.INFO, to_file: bool = True) -> None:
         _LOG_DIR.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(_LOG_FILE, encoding="utf-8"))
 
-    for name in ("ai_discovery", "ai_provider"):
+    for name in ("ai_discovery", "ai_provider", "app"):
         logger = logging.getLogger(name)
 
         # Avoid duplicate handlers when uvicorn --reload re-imports the app.

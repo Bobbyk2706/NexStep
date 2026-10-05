@@ -30,6 +30,17 @@ class EligibilityEvaluation:
     reasons: list[str]
 
 
+class MissingStudentInfoError(ValueError):
+    """
+    The student's profile lacks data that a rule needs
+    (for example, academic details were skipped).
+
+    Subclasses ValueError, so existing handlers keep working.
+    Rule-group evaluation treats it as "rule not met" instead of
+    failing the whole evaluation.
+    """
+
+
 # ============================================================
 # ATTRIBUTE HELPERS
 # ============================================================
@@ -96,7 +107,7 @@ def get_current_education(student):
     )
 
     if education is None:
-        raise ValueError(
+        raise MissingStudentInfoError(
             "Student has no current education."
         )
 
@@ -514,6 +525,9 @@ def check_rule(
 ) -> bool:
     """
     Evaluate one eligibility rule.
+
+    Raises MissingStudentInfoError when the student's profile has
+    no value for the attribute the rule needs.
     """
 
     attribute_name = (
@@ -526,9 +540,7 @@ def check_rule(
 
     operator = rule.operator.strip()
 
-    # --------------------------------------------------------
     # Work Experience
-    # --------------------------------------------------------
 
     if attribute == "work experience":
         return _evaluate_work_experience_rule(
@@ -537,9 +549,7 @@ def check_rule(
             rule.value,
         )
 
-    # --------------------------------------------------------
     # Student-level attributes
-    # --------------------------------------------------------
 
     if attribute in {
         "nationality",
@@ -553,9 +563,7 @@ def check_rule(
             attribute,
         )
 
-    # --------------------------------------------------------
     # Education-level attributes
-    # --------------------------------------------------------
 
     elif attribute in {
         "cgpa",
@@ -579,7 +587,7 @@ def check_rule(
         )
 
     if student_value is None:
-        raise ValueError(
+        raise MissingStudentInfoError(
             "Student information required for eligibility "
             f"rule '{attribute_name}' is missing."
         )
@@ -623,27 +631,31 @@ def _evaluate_rule_group(
 
     child_evaluations = []
 
-    # --------------------------------------------------------
     # Direct rules
-    # --------------------------------------------------------
 
     for rule in group.rules:
 
-        result = check_rule(
-            student,
-            rule,
-        )
+        description = _rule_description(rule)
+
+        try:
+            result = check_rule(
+                student,
+                rule,
+            )
+        except MissingStudentInfoError:
+            # Skipped profile details count as "not met", and the
+            # reason tells the student what to add.
+            result = False
+            description += " (add this to your profile)"
 
         child_evaluations.append(
             (
                 result,
-                _rule_description(rule),
+                description,
             )
         )
 
-    # --------------------------------------------------------
     # Child groups
-    # --------------------------------------------------------
 
     for child_group in group.child_groups:
 
@@ -665,9 +677,7 @@ def _evaluate_rule_group(
             "or child groups."
         )
 
-    # --------------------------------------------------------
     # Logical evaluation
-    # --------------------------------------------------------
 
     if group.logical_operator == "AND":
 
@@ -689,9 +699,7 @@ def _evaluate_rule_group(
             f"{group.logical_operator}"
         )
 
-    # --------------------------------------------------------
-    # Build reasons.
-    # --------------------------------------------------------
+    # Build reasons
 
     reasons: list[str] = []
 

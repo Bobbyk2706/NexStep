@@ -29,6 +29,8 @@ from app.services.eligibility_rule_service import (
     _create_rule_group_recursive,
 )
 
+from app.services.notification_services import queue_new_exam_notifications
+
 
 def _parse_date(
     value: str | None,
@@ -491,6 +493,8 @@ def approve_extraction_transaction(
 
             session.refresh(extraction)
 
+            queue_new_exam_notifications(extraction.notification_id)
+            
             return extraction
 
         except Exception:

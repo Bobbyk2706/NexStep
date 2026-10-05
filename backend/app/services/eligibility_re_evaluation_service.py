@@ -15,6 +15,7 @@ from app.models.studentexameligibility import (
 from app.services.eligibility_service import (
     evaluate_eligibility,
 )
+from app.services.notification_services import queue_eligibility_change_notifications
 
 
 class EligibilityReEvaluationError(RuntimeError):
@@ -269,15 +270,24 @@ def re_evaluate_exam_eligibility(
             if result.status_changed
         )
 
-        if owns_session:
-            db.commit()
-
-        return EligibilityReEvaluationResult(
+        final_result = EligibilityReEvaluationResult(
             exam_id=exam_id,
             students_evaluated=len(results),
             status_changes=status_changes,
             results=results,
         )
+
+        if owns_session:
+            db.commit()
+            queue_eligibility_change_notifications(final_result)
+        
+        return final_result
+
+    except EligibilityReEvaluationError:
+        if owns_session:
+            db.rollback()
+
+        raise
 
     except EligibilityReEvaluationError:
         if owns_session:
@@ -286,7 +296,48 @@ def re_evaluate_exam_eligibility(
         raise
 
     except Exception as error:
+        if owns_session:
+            db.rollback()
+
         raise EligibilityReEvaluationError(
-            f"Eligibility evaluation failed for student "
-            f"{student.student_id} and exam {exam_id}: {error}"
+            f"Eligibility re-evaluation failed for exam "
+            f"{exam_id}: {error}"
         ) from error
+
+    finally:
+        if owns_session:
+            db.close()
+
+
+def re_evaluate_after_review(
+    review_id: int,
+) -> EligibilityReEvaluationResult | None:
+    """
+    Re-check every active student tracking the exam whose monitoring
+    review was just applied. Creates "eligibility changed" notifications
+    for students whose status flipped.
+    """
+
+    from app.models.monitoring_review import MonitoringReview
+    from app.models.official_notification import OfficialNotification
+
+    with SessionLocal() as db:
+        review = db.get(MonitoringReview, review_id)
+
+        if review is None:
+            return None
+
+        notification = db.get(
+            OfficialNotification,
+            review.notification_id,
+        )
+
+        if notification is None:
+            return None
+
+        exam_id = notification.exam_id
+
+    return re_evaluate_exam_eligibility(
+        exam_id=exam_id,
+        requires_eligibility_re_evaluation=True,
+    )
