@@ -1,19 +1,38 @@
+# Production dependencies for Render (Root Directory: backend).
+# Keep in sync with ../pyproject.toml. pytest is left out on purpose.
+
+# Web API
 fastapi>=0.141,<1.0
 uvicorn>=0.52,<1.0
+
+# Database
 sqlalchemy>=2.0,<3.0
+psycopg[binary]>=3.2,<4.0
 psycopg2-binary>=2.9,<3.0
+alembic>=1.13,<2.0
+
+# Validation / configuration
 pydantic>=2.13,<3.0
 email-validator>=2.0,<3.0
 python-dotenv>=1.2,<2.0
+
+# HTTP / web discovery
 requests>=2.32,<3.0
-beautifulsoup4>=4.15,<5.0
-pymupdf>=1.28,<2.0
-bcrypt>=4.0,<6.0
-openai>=1.0,<3.0
-python-jose[cryptography]>=3.5,<4.0
-groq>=1.7.0
-apscheduler>=3.11.3
-ollama>=0.6.2
-tavily-python>=0.8.4
-pytest>=9.0,<10.0
 httpx>=0.27,<1.0
+beautifulsoup4>=4.15,<5.0
+tavily-python>=0.8.4
+
+# PDF processing
+pymupdf>=1.28,<2.0
+
+# Authentication / security
+bcrypt>=4.0,<6.0
+python-jose[cryptography]>=3.5,<4.0
+
+# AI providers
+openai>=1.0,<3.0
+groq>=1.7.0
+ollama>=0.6.2
+
+# Scheduling
+apscheduler>=3.11.3

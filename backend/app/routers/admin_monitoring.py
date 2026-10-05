@@ -36,6 +36,12 @@ from app.services.monitoring_review_service import (
     reject_monitoring_review,
 )
 
+import logging
+
+from app.services.eligibility_re_evaluation_service import (
+    re_evaluate_after_review,
+)
+
 
 router = APIRouter(
     prefix="/admin/monitoring",
@@ -520,6 +526,16 @@ def apply_review(
                 review_id=review_id
             )
         )
+
+        # Publishing is already committed. A failure here must not
+        # turn a successful publish into an error response.
+        try:
+            re_evaluate_after_review(applied_id)
+        except Exception:
+            logging.getLogger("app.notifications").exception(
+                "Eligibility re-check failed after applying review %s",
+                applied_id,
+            )
 
         return {
             "success": True,

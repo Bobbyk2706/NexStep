@@ -56,11 +56,21 @@ export function AuthProvider({ children }) {
     return res;
   }
 
-  async function signup(details) {
-    const res = await authApi.signup(details);
+  // Signup step 1: emails a code. No account or session exists yet.
+  async function startSignup(details) {
+    return authApi.startSignup(details);
+  }
+
+  // Signup step 2: confirms the code, creates the account, signs the person in.
+  async function verifySignup(email, code) {
+    const res = await authApi.verifySignup({ email, code });
     setUser(res.user || null);
     setHasProfile(Boolean(res.hasProfile));
     return res;
+  }
+
+  async function resendSignupCode(email) {
+    return authApi.resendSignupCode(email);
   }
 
   async function logout() {
@@ -83,7 +93,9 @@ export function AuthProvider({ children }) {
         hasProfile,
         checking,
         login,
-        signup,
+        startSignup,
+        verifySignup,
+        resendSignupCode,
         logout,
         markProfileComplete,
       }}

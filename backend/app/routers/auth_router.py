@@ -2,6 +2,7 @@ from typing import Union
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import JWTError
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
@@ -14,7 +15,6 @@ from app.auth.dependencies import (
     is_account_blocked,
 )
 from app.auth.security import (
-    hash_password,
     verify_password,
     create_access_token,
     create_refresh_token,
@@ -22,94 +22,42 @@ from app.auth.security import (
     decode_token,
 )
 from app.schemas.auth import (
-    StudentSignupRequest,
     LoginRequest,
     RefreshRequest,
     TokenPair,
     StudentOut,
     AdminOut,
-    SimpleSignupRequest,
     AuthResponse,
     UserSummary,
 )
 from app.routers.profile_router import student_has_profile
 
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 # ---------------------------------------------------------------- signup ---
-
-@router.post(
-    "/student/signup",
-    response_model=StudentOut,
-    status_code=status.HTTP_201_CREATED,
-)
-def student_signup(payload: StudentSignupRequest, db: Session = Depends(get_db)):
-    existing = db.query(Student).filter(Student.email == payload.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    student = Student(
-        name=payload.name,
-        email=payload.email,
-        password_hash=hash_password(payload.password),
-        date_of_birth=payload.date_of_birth,
-        nationality=payload.nationality,
-        state=payload.state,
-        gender=payload.gender,
-        account_status="active",
-    )
-    db.add(student)
-    db.commit()
-    db.refresh(student)
-    return student
-
-
+#
+# Student signup is email-verified and lives in
+# app/routers/signup_verification_router.py (/auth/register/start,
+# /auth/register/verify, /auth/register/resend). The old unverified
+# /auth/signup and /auth/student/signup routes were removed on purpose, so
+# an account can't be created without confirming its email first.
+#
 # NOTE: no admin self-signup route — admin accounts are provisioned
 # directly (e.g. by another admin or a DB seed script), not via a public
-# endpoint. Say the word if NexStep needs an admin-invite flow instead.
+# endpoint.
 
 
 # ------------------------------------------------ unified (frontend) ---
 
-@router.post(
-    "/signup",
-    response_model=AuthResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def unified_signup(payload: SimpleSignupRequest, db: Session = Depends(get_db)):
-    """Matches the frontend's exact contract: name/email/password only,
-    returns a single token (no refresh token — the frontend doesn't
-    implement refresh handling) plus hasProfile. Student-only; wraps the
-    same Student row /auth/student/signup uses, just with the extra
-    fields (DOB/nationality/state/gender) left unset until the profile
-    step fills them in via PUT /student/profile."""
-    existing = db.query(Student).filter(Student.email == payload.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    student = Student(
-        name=payload.name,
-        email=payload.email,
-        password_hash=hash_password(payload.password),
-        account_status="active",
-        token_version=new_token_version(),
-    )
-    db.add(student)
-    db.commit()
-    db.refresh(student)
-
-    access = create_access_token(student.student_id, "student")
-    return AuthResponse(
-        token=access,
-        user=UserSummary(name=student.name, email=student.email),
-        hasProfile=False,
-    )
-
-
 @router.post("/login", response_model=AuthResponse)
 def unified_login(payload: LoginRequest, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.email == payload.email).first()
+    student = (
+        db.query(Student)
+        .filter(func.lower(Student.email) == payload.email.lower())
+        .first()
+    )
     if not student or not verify_password(payload.password, student.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     if is_account_blocked(student.account_status):
@@ -131,7 +79,11 @@ def unified_login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 @router.post("/student/login", response_model=TokenPair)
 def student_login(payload: LoginRequest, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.email == payload.email).first()
+    student = (
+        db.query(Student)
+        .filter(func.lower(Student.email) == payload.email.lower())
+        .first()
+    )
     if not student or not verify_password(payload.password, student.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     if is_account_blocked(student.account_status):
