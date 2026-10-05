@@ -622,7 +622,6 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13,<3.0" },
     { name = "pymupdf", specifier = ">=1.28,<2.0" },
     { name = "pytest", specifier = ">=9.0,<10.0" },
-    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-dotenv", specifier = ">=1.2,<2.0" },
     { name = "python-jose", extras = ["cryptography"], specifier = ">=3.5,<4.0" },
     { name = "requests", specifier = ">=2.32,<3.0" },
