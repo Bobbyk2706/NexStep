@@ -1,10 +1,87 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, ExternalLink, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, ExternalLink, CheckCircle2, Info } from "lucide-react";
 import Card from "../components/ui/Card";
 import EligibilityPill from "../components/ui/EligibilityPill";
 import * as examsApi from "../api/exams";
 import { formatDate } from "../utils/date";
+
+// "Age 21 to 32" / "Minimum age 21" / "Maximum age 32", or null.
+function ageText(info) {
+  const { minimum_age: min, maximum_age: max } = info || {};
+
+  if (min != null && max != null) return `${min} to ${max} years`;
+  if (min != null) return `At least ${min} years`;
+  if (max != null) return `Up to ${max} years`;
+
+  return null;
+}
+
+function EligibilityDetails({ info, officialUrl }) {
+  if (!info) return null;
+
+  const rows = [
+    ["Age", ageText(info)],
+    ["Qualification", info.educational_qualification],
+    ["Nationality", info.nationality],
+    ["Work experience", info.work_experience],
+  ].filter(([, value]) => value);
+
+  const other = info.other_requirements || [];
+
+  if (info.not_available && rows.length === 0 && other.length === 0) {
+    return (
+      <Card className="flex items-start gap-3">
+        <Info size={18} className="mt-0.5 shrink-0 text-slate-400" />
+        <div>
+          <p className="font-medium text-ink">Eligibility is not stated in the notification</p>
+          <p className="mt-1 text-sm text-slate-500">
+            Please read the official notification before applying.
+            {officialUrl && (
+              <>
+                {" "}
+                <a href={officialUrl} target="_blank" rel="noreferrer" className="font-medium text-gold hover:underline">
+                  Open official notification
+                </a>
+              </>
+            )}
+          </p>
+        </div>
+      </Card>
+    );
+  }
+
+  if (rows.length === 0 && other.length === 0) return null;
+
+  return (
+    <Card>
+      <h2 className="font-display text-base font-semibold text-ink">Eligibility from the official notification</h2>
+
+      {rows.length > 0 && (
+        <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+          {rows.map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-xs uppercase tracking-wide text-slate-400">{label}</dt>
+              <dd className="mt-0.5 text-sm text-ink">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+
+      {other.length > 0 && (
+        <ul className="mt-4 flex list-disc flex-col gap-1.5 pl-5 text-sm text-slate-600">
+          {other.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+      )}
+
+      <p className="mt-4 text-xs text-slate-400">
+        Always confirm against the official notification before you apply.
+      </p>
+    </Card>
+  );
+}
 
 function firstExamDate(notification) {
   const dates = notification?.exam_dates || [];
@@ -68,6 +145,7 @@ export default function ExamDetails() {
 
   const notification = exam.latest_approved_notification;
   const eligible = eligibility?.eligibility_status === "ELIGIBLE";
+  const unknown = eligibility?.eligibility_status === "UNKNOWN";
   const reason = eligibility?.reason || "No eligibility result is available.";
   const examDate = firstExamDate(notification);
 
@@ -84,17 +162,26 @@ export default function ExamDetails() {
         </div>
         <EligibilityPill
           eligible={eligible}
+          unknown={unknown}
           deadline={notification?.application_end_date}
         />
       </div>
 
       <Card className="flex items-start gap-3">
-        <CheckCircle2 size={18} className={`mt-0.5 shrink-0 ${eligible ? "text-signal-500" : "text-slate-400"}`} />
+        {unknown ? (
+          <Info size={18} className="mt-0.5 shrink-0 text-slate-400" />
+        ) : (
+          <CheckCircle2 size={18} className={`mt-0.5 shrink-0 ${eligible ? "text-signal-500" : "text-slate-400"}`} />
+        )}
         <div>
-          <p className="font-medium text-ink">{eligible ? "You're eligible" : "You're not eligible — yet"}</p>
+          <p className="font-medium text-ink">
+            {unknown ? "Check the official notification" : eligible ? "You're eligible" : "You're not eligible — yet"}
+          </p>
           <p className="mt-1 whitespace-pre-line text-sm text-slate-500">{reason}</p>
         </div>
       </Card>
+
+      <EligibilityDetails info={exam.eligibility_info} officialUrl={notification?.official_url} />
 
       <div className="grid gap-4 sm:grid-cols-3">
         <Card>
@@ -155,3 +242,4 @@ export default function ExamDetails() {
     </div>
   );
 }
+

@@ -1,0 +1,3466 @@
+
+=== FILE: frontend\src\admin\AdminApp.jsx ===
+import { Routes, Route, Navigate } from "react-router-dom";
+import { RequireAdminAuth } from "./routes/AdminProtectedRoute";
+import AdminShell from "./components/AdminShell";
+
+import AdminDashboard from "./pages/AdminDashboard";
+import AddExam from "./pages/AddExam";
+import ExtractionDetail from "./pages/ExtractionDetail";
+import ExtractionHistory from "./pages/ExtractionHistory";
+import AllExams from "./pages/AllExams";
+import ExamDetailAdmin from "./pages/ExamDetailAdmin";
+import AdminNotifications from "./pages/AdminNotifications";
+
+import MonitoringReviews from "./pages/MonitoringReviews";
+import MonitoringReviewDetail from "./pages/MonitoringReviewDetail";
+
+// Auth (AdminAuthProvider) is mounted once at the App root now,
+// alongside the student AuthProvider. This sub-router only owns
+// the /admin/* screens themselves.
+export default function AdminApp() {
+  return (
+    <Routes>
+      <Route element={<RequireAdminAuth />}>
+        <Route element={<AdminShell />}>
+          {/* Dashboard */}
+          <Route
+            path="dashboard"
+            element={<AdminDashboard />}
+          />
+
+          {/* Exams */}
+          <Route
+            path="exams"
+            element={<AllExams />}
+          />
+
+          <Route
+            path="exams/new"
+            element={<AddExam />}
+          />
+
+          <Route
+            path="exams/:examId"
+            element={<ExamDetailAdmin />}
+          />
+
+          {/* Extraction pipeline */}
+          <Route
+            path="extractions"
+            element={<ExtractionHistory />}
+          />
+
+          <Route
+            path="extractions/:id"
+            element={<ExtractionDetail />}
+          />
+
+          {/* Notifications */}
+          <Route
+            path="notifications"
+            element={<AdminNotifications />}
+          />
+
+          {/* Document Monitoring */}
+          <Route
+            path="monitoring"
+            element={<MonitoringReviews />}
+          />
+
+          <Route
+            path="monitoring/reviews"
+            element={<MonitoringReviews />}
+          />
+
+          <Route
+            path="monitoring/reviews/:reviewId"
+            element={<MonitoringReviewDetail />}
+          />
+        </Route>
+      </Route>
+
+      {/* Any unmatched /admin/* path lands on the guarded dashboard route.
+          If there is no admin session, RequireAdminAuth redirects to /login. */}
+      <Route
+        path="*"
+        element={<Navigate to="/admin/dashboard" replace />}
+      />
+    </Routes>
+  );
+}
+
+=== FILE: frontend\src\admin\api\adminAuth.js ===
+import {
+  adminRequest,
+  getAdminToken,
+  setAdminSession,
+  clearAdminSession,
+} from "./adminClient";
+
+export { getAdminToken };
+
+export async function adminLogin({ email, password }) {
+  const tokens = await adminRequest("/api/auth/admin/login", {
+    method: "POST",
+    body: { email, password },
+    auth: false,
+  });
+
+  if (!tokens?.access_token || !tokens?.refresh_token) {
+    throw new Error("Admin login succeeded but authentication tokens were not returned.");
+  }
+
+  setAdminSession({
+    access: tokens.access_token,
+    refresh: tokens.refresh_token,
+  });
+
+  const admin = await fetchAdminSession();
+  return { token: tokens.access_token, admin };
+}
+
+export async function fetchAdminSession() {
+  const me = await adminRequest("/api/auth/me");
+  return { name: me.name, email: me.email };
+}
+
+export function adminLogout() {
+  const token = getAdminToken();
+  clearAdminSession();
+
+  if (token) {
+    adminRequest("/api/auth/logout", {
+      method: "POST",
+      auth: false,
+      headers: { Authorization: `Bearer ${token}` },
+    }).catch(() => {});
+  }
+}
+
+
+=== FILE: frontend\src\admin\api\adminClient.js ===
+import { BASE_URL, createClient } from "../../api/client";
+
+const ROOT_API_URL = BASE_URL.replace(/\/api\/?$/, "");
+const ADMIN_TOKEN_KEY = "nexstep_admin_token";
+const ADMIN_REFRESH_KEY = "nexstep_admin_refresh_token";
+
+export function getAdminToken() {
+  return localStorage.getItem(ADMIN_TOKEN_KEY);
+}
+
+export function setAdminSession({ access, refresh }) {
+  localStorage.setItem(ADMIN_TOKEN_KEY, access);
+  if (refresh) {
+    localStorage.setItem(ADMIN_REFRESH_KEY, refresh);
+  }
+}
+
+export function clearAdminSession() {
+  localStorage.removeItem(ADMIN_TOKEN_KEY);
+  localStorage.removeItem(ADMIN_REFRESH_KEY);
+}
+
+let inFlight = null;
+
+function refreshAdminSession() {
+  if (!inFlight) {
+    inFlight = (async () => {
+      const sent = localStorage.getItem(ADMIN_REFRESH_KEY);
+      if (!sent) return false;
+
+      const res = await fetch(`${BASE_URL}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: sent }),
+      });
+
+      if (!res.ok) {
+        return localStorage.getItem(ADMIN_REFRESH_KEY) !== sent;
+      }
+
+      const data = await res.json();
+      setAdminSession({
+        access: data.access_token,
+        refresh: data.refresh_token,
+      });
+      return true;
+    })().finally(() => {
+      inFlight = null;
+    });
+  }
+
+  return inFlight;
+}
+
+const expiredListeners = new Set();
+
+export function onAdminSessionExpired(fn) {
+  expiredListeners.add(fn);
+  return () => expiredListeners.delete(fn);
+}
+
+// Admin authentication lives under /api, while the admin discovery/review
+// routes are mounted at /admin in the backend. Keeping this client rooted at
+// the server origin lets one request helper handle both route groups.
+export const adminRequest = createClient({
+  getToken: getAdminToken,
+  refresh: refreshAdminSession,
+  baseUrl: ROOT_API_URL,
+  onUnauthorized() {
+    clearAdminSession();
+    expiredListeners.forEach((fn) => fn());
+  },
+});
+
+
+=== FILE: frontend\src\admin\api\adminExams.js ===
+import { adminRequest } from "./adminClient";
+import { getExtractionById, listExtractions } from "./adminExtractions";
+
+function firstExamDate(notification) {
+  const dates = notification?.exam_dates || [];
+  if (dates.length === 0) return null;
+
+  return [...dates].sort(
+    (a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime()
+  )[0]?.start_date || null;
+}
+
+function normalizeApprovedExam(exam, extraction) {
+  const notification = exam.latest_approved_notification || null;
+
+  return {
+    id: extraction?.id || null,
+    examId: exam.exam_id,
+    examName: exam.name,
+    status: "APPROVED",
+    version: extraction?.version || 1,
+    approvedDate: extraction?.createdDate || notification?.release_date || null,
+    source: {
+      url: notification?.official_url || exam.off_exam_page || null,
+      document: notification?.document_url || notification?.title || "Official notification",
+      downloadedDate: notification?.release_date || null,
+    },
+    examInformation: {
+      conductingBody: exam.conducting_body?.name || null,
+      releaseDate: notification?.release_date || null,
+      applicationStartDate: notification?.application_start_date || null,
+      applicationEndDate: notification?.application_end_date || null,
+      examDates: (notification?.exam_dates || []).map((dateRange) => ({
+        startDate: dateRange.start_date,
+        endDate: dateRange.end_date,
+      })),
+    },
+    eligibilityInformation: null,
+    eligibilityRules: null,
+  };
+}
+
+export async function listApprovedExams() {
+  const [publicExams, approvedExtractions] = await Promise.all([
+    adminRequest("/api/exams"),
+    listExtractions({ status: "APPROVED" }),
+  ]);
+
+  const latestExtractionByExam = new Map();
+
+  for (const extraction of approvedExtractions) {
+    const existing = latestExtractionByExam.get(extraction.examId);
+    if (!existing || new Date(extraction.createdDate || 0) > new Date(existing.createdDate || 0)) {
+      latestExtractionByExam.set(extraction.examId, extraction);
+    }
+  }
+
+  return Promise.all(
+    (publicExams || []).map(async (exam) => {
+      try {
+        const detail = await adminRequest(`/api/exams/${encodeURIComponent(exam.exam_id)}`);
+        return normalizeApprovedExam(detail, latestExtractionByExam.get(exam.exam_id));
+      } catch {
+        return null;
+      }
+    })
+  ).then((rows) => rows.filter(Boolean));
+}
+
+export async function getApprovedExamByExamId(examId) {
+  const exams = await listApprovedExams();
+  const exam = exams.find((item) => String(item.examId) === String(examId));
+
+  if (!exam) return null;
+  if (!exam.id) return exam;
+
+  try {
+    const extraction = await getExtractionById(exam.id);
+    return {
+      ...exam,
+      examInformation: extraction.examInformation || exam.examInformation,
+      eligibilityInformation: extraction.eligibilityInformation,
+      eligibilityRules: extraction.eligibilityRules,
+      source: extraction.source || exam.source,
+      version: extraction.version || exam.version,
+      approvedDate: extraction.createdDate || exam.approvedDate,
+    };
+  } catch {
+    return exam;
+  }
+}
+
+
+=== FILE: frontend\src\admin\api\adminExtractions.js ===
+import { adminRequest } from "./adminClient";
+
+const BACKEND_STATUS_TO_UI = {
+  PENDING: "PENDING_REVIEW",
+  PENDING_REVIEW: "PENDING_REVIEW",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+  FAILED: "FAILED",
+};
+
+const UI_STATUS_TO_BACKEND = {
+  PENDING_REVIEW: "PENDING",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+  FAILED: "FAILED",
+};
+
+function mapGroup(group) {
+  return {
+    logicalOperator: group?.logical_operator || "AND",
+    rules: (group?.rules || []).map((rule) => ({
+      attribute: rule.attribute,
+      operator: rule.operator,
+      value: rule.value,
+    })),
+    childGroups: (group?.child_groups || []).map(mapGroup),
+  };
+}
+
+function parseExtractedContent(value) {
+  if (!value) return null;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function basename(value) {
+  if (!value) return "Original document";
+  return value.split(/[\\/]/).pop() || value;
+}
+
+function mapHistoryRow(row, version = 1) {
+  return {
+    id: row.extraction_id,
+    extractionId: row.extraction_id,
+    notificationId: row.notification_id,
+    examId: row.exam_id,
+    examName: row.exam_name,
+    notificationTitle: row.notification_title,
+    extractionType: row.extraction_type,
+    version,
+    status: BACKEND_STATUS_TO_UI[row.status] || row.status,
+    createdDate: row.created_at,
+    changeDetected: Boolean(row.change_detected),
+    changeDetails: row.change_details || "",
+  };
+}
+
+function withVersions(rows) {
+  const sorted = [...rows].sort((a, b) => {
+    const byNotification = Number(a.notification_id) - Number(b.notification_id);
+    if (byNotification !== 0) return byNotification;
+
+    const byDate = new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
+    if (byDate !== 0) return byDate;
+
+    return Number(a.extraction_id) - Number(b.extraction_id);
+  });
+
+  const counters = new Map();
+
+  return sorted.map((row) => {
+    const next = (counters.get(row.notification_id) || 0) + 1;
+    counters.set(row.notification_id, next);
+    return mapHistoryRow(row, next);
+  });
+}
+
+async function fetchHistoryRows() {
+  return adminRequest("/admin/extractions");
+}
+
+export async function listExtractions({ status = "All" } = {}) {
+  const rawRows = await fetchHistoryRows();
+  const rows = withVersions(rawRows || []);
+  const backendStatus = UI_STATUS_TO_BACKEND[status];
+
+  return rows
+    .filter((row) => !backendStatus || row.status === BACKEND_STATUS_TO_UI[backendStatus])
+    .sort((a, b) => new Date(b.createdDate || 0).getTime() - new Date(a.createdDate || 0).getTime());
+}
+
+export async function getExtractionById(id) {
+  if (id === undefined || id === null || id === "") {
+    throw new Error("Extraction ID is required.");
+  }
+
+  const [detail, history] = await Promise.all([
+    adminRequest(`/admin/extractions/${encodeURIComponent(id)}`),
+    fetchHistoryRows(),
+  ]);
+
+  const rows = withVersions(history || []);
+  const summary = rows.find((row) => String(row.id) === String(id));
+  const parsed = parseExtractedContent(detail?.extracted_content);
+  const extractionData = parsed?.extraction || {};
+  const examInformation = extractionData.exam_information || {};
+  const eligibilityInformation = examInformation.eligibility || {};
+  const ruleGroups = extractionData.eligibility_rules?.rule_groups || [];
+
+  const status = summary?.status || BACKEND_STATUS_TO_UI[detail?.status] || detail?.status;
+
+  return {
+    id: Number(detail.extraction_id),
+    extractionId: Number(detail.extraction_id),
+    notificationId: Number(detail.notification_id),
+    examId: summary?.examId || null,
+    examName: examInformation.exam_name || summary?.examName || "Exam extraction",
+    version: summary?.version || 1,
+    status,
+    createdDate: detail.created_at || summary?.createdDate,
+    source: {
+      url: detail.official_url || null,
+      document: basename(detail.original_document),
+      downloadedDate: detail.created_at || summary?.createdDate,
+    },
+    examInformation: {
+      conductingBody: examInformation.conducting_body || null,
+      releaseDate: examInformation.release_date || null,
+      applicationStartDate: examInformation.application_start_date || null,
+      applicationEndDate: examInformation.application_end_date || null,
+      examDates: (examInformation.exam_dates || []).map((dateRange) => ({
+        startDate: dateRange.start_date,
+        endDate: dateRange.end_date,
+      })),
+    },
+    eligibilityInformation: {
+      minAge: eligibilityInformation.minimum_age,
+      maxAge: eligibilityInformation.maximum_age,
+      educationalQualification: eligibilityInformation.educational_qualification,
+      nationality: eligibilityInformation.nationality,
+      workExperience: eligibilityInformation.work_experience,
+      otherRequirements: Array.isArray(eligibilityInformation.other_requirements)
+        ? eligibilityInformation.other_requirements.join("; ")
+        : eligibilityInformation.other_requirements || null,
+    },
+    eligibilityRules: {
+      logicalOperator: "AND",
+      rules: [],
+      childGroups: ruleGroups.map(mapGroup),
+    },
+    evidence: (parsed?.evidence || []).map((item, index) => ({
+      id: `${detail.extraction_id}-evidence-${index}`,
+      field: item.field || "Extracted evidence",
+      chunkNumber: item.chunk_number,
+      pageNumbers: item.page_numbers || [],
+      sourceText: item.source_text,
+      verified: item.verified ?? null,
+      section: item.section || null,
+    })),
+    conflicts: (parsed?.conflicts || []).map((conflict) => ({
+      field: conflict.field,
+      chosen: conflict.chosen || null,
+      reason: conflict.reason || "",
+      options: (conflict.options || []).map((option) => ({
+        value: option.value,
+        source: [
+          option.source,
+          option.pages?.length ? `p. ${option.pages.join(", ")}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      })),
+    })),
+    validationIssues: (parsed?.issues || []).map((issue) => ({
+      severity: issue.severity || "warning",
+      message: issue.message,
+      field: issue.field || null,
+    })),
+    pipeline: parsed?.pipeline || null,
+    rejectFeedback: status === "REJECTED" ? detail.change_details || "" : "",
+    feedbackHistory: [],
+    aiSummary: detail.ai_summary || null,
+    changeDetected: Boolean(detail.change_detected),
+    changeDetails: detail.change_details || "",
+  };
+}
+
+export async function createExamExtraction(examName) {
+  const trimmed = examName?.trim();
+  if (!trimmed) {
+    throw new Error("Enter an exam name to start.");
+  }
+
+  const result = await adminRequest("/admin/extractions", {
+    method: "POST",
+    body: { exam_name: trimmed },
+  });
+
+  return {
+    ...result,
+    id: result.extraction_id ?? result.id,
+    status: BACKEND_STATUS_TO_UI[result.status] || result.status,
+  };
+}
+
+export async function approveExtraction(id) {
+  return adminRequest(`/admin/extractions/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+  });
+}
+
+export async function rejectExtraction(id, feedback) {
+  const trimmed = feedback?.trim();
+  if (!trimmed) {
+    throw new Error("Feedback is required to reject an extraction.");
+  }
+
+  return adminRequest(`/admin/extractions/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+    body: { feedback: trimmed },
+  });
+}
+
+export async function retryExtraction(id) {
+  const result = await adminRequest(`/admin/extractions/${encodeURIComponent(id)}/retry`, {
+    method: "POST",
+  });
+
+  return {
+    ...result,
+    id: result.extraction_id,
+    status: BACKEND_STATUS_TO_UI[result.status] || result.status,
+  };
+}
+
+export async function getDashboardStats() {
+  const rows = await listExtractions();
+
+  return {
+    pendingReviews: rows.filter((row) => row.status === "PENDING_REVIEW").length,
+    approvedExams: rows.filter((row) => row.status === "APPROVED").length,
+    rejectedExtractions: rows.filter((row) => row.status === "REJECTED").length,
+    failedExtractions: rows.filter((row) => row.status === "FAILED").length,
+    recent: rows.slice(0, 6),
+  };
+}
+
+
+=== FILE: frontend\src\admin\api\adminMonitoring.js ===
+import { adminRequest } from "./adminClient";
+
+export async function runMonitoring() {
+  return adminRequest("/api/admin/monitoring/run", {
+    method: "POST",
+  });
+}
+
+export async function getMonitoringReviews(status) {
+  const query = status
+    ? `?status_filter=${encodeURIComponent(status)}`
+    : "";
+
+  return adminRequest(
+    `/api/admin/monitoring/reviews${query}`
+  );
+}
+
+export async function getMonitoringReview(reviewId) {
+  return adminRequest(
+    `/api/admin/monitoring/reviews/${reviewId}`
+  );
+}
+
+export async function approveMonitoringReview(
+  reviewId
+) {
+  return adminRequest(
+    `/api/admin/monitoring/reviews/${reviewId}/approve`,
+    {
+      method: "POST",
+    }
+  );
+}
+
+export async function rejectMonitoringReview(
+  reviewId,
+  reason
+) {
+  return adminRequest(
+    `/api/admin/monitoring/reviews/${reviewId}/reject`,
+    {
+      method: "POST",
+      body: {
+        reason,
+      },
+    }
+  );
+}
+
+export async function applyMonitoringReview(
+  reviewId
+) {
+  return adminRequest(
+    `/api/admin/monitoring/reviews/${reviewId}/apply`,
+    {
+      method: "POST",
+    }
+  );
+}
+
+=== FILE: frontend\src\admin\api\adminNotifications.js ===
+import { adminRequest } from "./adminClient";
+
+/**
+ * Notifications sent to students, newest first.
+ * Backend: GET /admin/notifications
+ */
+export async function getNotificationLog({ emailStatus = "", limit = 100 } = {}) {
+  const params = new URLSearchParams();
+
+  if (emailStatus) params.set("email_status", emailStatus);
+  params.set("limit", String(limit));
+
+  const data = await adminRequest(`/admin/notifications?${params.toString()}`);
+
+  return (data || []).map((row) => ({
+    id: row.notification_id,
+    studentId: row.student_id,
+    studentName: row.student_name,
+    studentEmail: row.student_email,
+    examId: row.exam_id,
+    examName: row.exam_name,
+    type: row.notification_type,
+    title: row.title,
+    message: row.message,
+    isRead: Boolean(row.is_read),
+    createdAt: row.created_at,
+    emailStatus: row.email_status,
+    emailSentAt: row.email_sent_at,
+    emailError: row.email_error,
+  }));
+}
+
+/**
+ * Counts by email status.
+ * Backend: GET /admin/notifications/summary
+ */
+export async function getNotificationSummary() {
+  return adminRequest("/admin/notifications/summary");
+}
+
+/**
+ * Retry a failed or skipped email.
+ * Backend: POST /admin/notifications/{id}/retry-email
+ */
+export async function retryNotificationEmail(id) {
+  return adminRequest(
+    `/admin/notifications/${encodeURIComponent(id)}/retry-email`,
+    { method: "POST" }
+  );
+}
+
+/**
+ * Run the deadline-reminder job now.
+ * Backend: POST /admin/notifications/run-deadline-reminders
+ */
+export async function runDeadlineReminders() {
+  return adminRequest("/admin/notifications/run-deadline-reminders", {
+    method: "POST",
+  });
+}
+
+=== FILE: frontend\src\admin\components\AdminShell.jsx ===
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import {
+  LayoutDashboard,
+  FileStack,
+  FilePlus2,
+  Inbox,
+  History,
+  Bell,
+  Activity,
+  LogOut,
+} from "lucide-react";
+
+import { useAdminAuth } from "../context/AdminAuthContext";
+
+const NAV_ITEMS = [
+  {
+    to: "/admin/dashboard",
+    label: "Dashboard",
+    icon: LayoutDashboard,
+  },
+  {
+    to: "/admin/exams",
+    label: "All Exams",
+    icon: FileStack,
+  },
+  {
+    to: "/admin/exams/new",
+    label: "Add Exam",
+    icon: FilePlus2,
+  },
+  {
+    to: "/admin/extractions?status=PENDING_REVIEW",
+    label: "Pending Review",
+    icon: Inbox,
+  },
+  {
+    to: "/admin/extractions",
+    label: "Extraction History",
+    icon: History,
+    end: true,
+  },
+  {
+    to: "/admin/notifications",
+    label: "Notifications",
+    icon: Bell,
+  },
+  {
+    to: "/admin/monitoring",
+    label: "Monitoring",
+    icon: Activity,
+  },
+];
+
+export default function AdminShell() {
+  const { admin, logout } = useAdminAuth();
+  const navigate = useNavigate();
+
+  function handleLogout() {
+    logout();
+    navigate("/login");
+  }
+
+  return (
+    <div className="min-h-screen bg-paper md:flex">
+      {/* Sidebar */}
+      <aside className="flex w-full shrink-0 flex-col bg-ink px-4 py-6 md:min-h-screen md:w-64">
+        {/* Logo */}
+        <div className="flex items-center gap-2 px-2 pb-8">
+          <span className="font-display text-lg font-semibold tracking-tight text-white">
+            Nex<span className="text-indigo-300">Step</span>
+          </span>
+
+          <span className="rounded-md bg-white/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-200">
+            Admin
+          </span>
+        </div>
+
+        {/* Navigation */}
+        <nav className="flex flex-1 flex-col gap-1">
+          {NAV_ITEMS.map((item) => (
+            <NavLink
+              key={item.to + item.label}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) =>
+                `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                  isActive
+                    ? "bg-white/10 text-white"
+                    : "text-slate-300 hover:bg-white/5 hover:text-white"
+                }`
+              }
+            >
+              <item.icon
+                size={17}
+                strokeWidth={2}
+              />
+
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+
+        {/* Admin account */}
+        <div className="mt-auto flex items-center justify-between gap-2 rounded-xl px-3 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-white">
+              {admin?.name}
+            </p>
+
+            <p className="truncate text-xs text-slate-300">
+              {admin?.email}
+            </p>
+          </div>
+
+          <button
+            onClick={handleLogout}
+            aria-label="Log out"
+            className="rounded-lg p-2 text-slate-300 transition hover:bg-white/10 hover:text-amber-300"
+          >
+            <LogOut size={16} />
+          </button>
+        </div>
+      </aside>
+
+      {/* Main content */}
+      <main className="flex-1">
+        <div className="mx-auto max-w-5xl px-5 py-8 md:px-8">
+          <Outlet />
+        </div>
+      </main>
+    </div>
+  );
+}
+
+=== FILE: frontend\src\admin\components\ConflictPanel.jsx ===
+import { AlertTriangle } from "lucide-react";
+
+export default function ConflictPanel({ conflicts = [] }) {
+  if (conflicts.length === 0) return null;
+  return (
+    <div className="rounded-2xl border-2 border-red-200 bg-red-50 p-5">
+      <div className="flex items-center gap-2 text-red-700">
+        <AlertTriangle size={18} />
+        <h2 className="font-display text-base font-semibold">Conflict Detected</h2>
+      </div>
+      <p className="mt-1 text-sm text-red-600">The document gives more than one value. A provisional value was chosen — verify it against the source before approving.</p>
+      <div className="mt-4 flex flex-col gap-4">
+        {conflicts.map((conflict, i) => (
+          <div key={i}>
+            <p className="text-sm font-medium text-ink">
+              {conflict.field}
+              {conflict.chosen && (
+                <span className="ml-2 text-xs font-normal text-slate-500">
+                  provisionally using: <span className="font-mono">{conflict.chosen}</span>
+                </span>
+              )}
+            </p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {conflict.options.map((opt, j) => (
+                <div key={j} className="rounded-xl border border-red-200 bg-slate-50 p-3">
+                  <p className="text-xs text-slate-400">Extraction {String.fromCharCode(65 + j)}</p>
+                  <p className="mt-0.5 font-mono text-sm font-semibold text-ink">{opt.value}</p>
+                  <p className="mt-0.5 text-xs text-slate-500">Source: {opt.source}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\EligibilityInfoCard.jsx ===
+import Card from "../../components/ui/Card";
+
+function Field({ label, value }) {
+  return (
+    <div>
+      <p className="text-xs text-slate-400">{label}</p>
+      <p className={`mt-0.5 text-sm font-medium ${value ? "text-ink" : "text-slate-400"}`}>
+        {value || "Not specified"}
+      </p>
+    </div>
+  );
+}
+
+export default function EligibilityInfoCard({ info }) {
+  if (!info) return null;
+
+  return (
+    <Card>
+      <h2 className="mb-4 font-mono text-xs uppercase tracking-wide text-slate-400">Eligibility Information</h2>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Minimum Age" value={info.minAge} />
+        <Field label="Maximum Age" value={info.maxAge} />
+        <Field label="Educational Qualification" value={info.educationalQualification} />
+        <Field label="Nationality" value={info.nationality} />
+        <Field label="Work Experience" value={info.workExperience} />
+        <Field label="Other Requirements" value={info.otherRequirements} />
+      </div>
+    </Card>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\EvidencePanel.jsx ===
+import { useState } from "react";
+import { ChevronDown } from "lucide-react";
+import Card from "../../components/ui/Card";
+
+function EvidenceItem({ item, sourceUrl }) {
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+        <span>Ref <span className="font-mono text-ink">{item.chunkNumber || "—"}</span></span>
+        <span>Pages <span className="font-mono text-ink">{item.pageNumbers.join(", ") || "—"}</span></span>
+        {item.section && <span className="truncate">Section <span className="text-ink">{item.section}</span></span>}
+        {item.verified === true && (
+          <span className="rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-700">Found in document</span>
+        )}
+        {item.verified === false && (
+          <span className="rounded bg-red-50 px-1.5 py-0.5 font-medium text-red-700">Quote not found</span>
+        )}
+      </div>
+      <blockquote className="mt-2 border-l-2 border-indigo-200 pl-3 text-sm italic text-slate-600">
+        "{item.sourceText}"
+      </blockquote>
+      {sourceUrl && (
+        <a href={sourceUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs font-medium text-gold hover:underline">
+          View Source
+        </a>
+      )}
+    </div>
+  );
+}
+
+function FieldGroup({ field, items, sourceUrl }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-b border-slate-100 py-3 last:border-none">
+      <button type="button" onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between gap-3 text-left">
+        <span className="text-sm font-medium text-ink">{field}</span>
+        <span className="flex items-center gap-2 text-xs text-slate-400">
+          {items.length} evidence entr{items.length === 1 ? "y" : "ies"}
+          <ChevronDown size={14} className={`transition-transform ${open ? "rotate-180" : ""}`} />
+        </span>
+      </button>
+      {open && (
+        <div className="mt-3 flex flex-col gap-2">
+          {items.map((item) => (
+            <EvidenceItem key={item.id} item={item} sourceUrl={sourceUrl} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function EvidencePanel({ evidence = [], sourceUrl }) {
+  if (evidence.length === 0) return null;
+  const byField = evidence.reduce((acc, item) => {
+    acc[item.field] = acc[item.field] || [];
+    acc[item.field].push(item);
+    return acc;
+  }, {});
+
+  return (
+    <Card>
+      <h2 className="mb-1 font-mono text-xs uppercase tracking-wide text-slate-400">Evidence / Provenance</h2>
+      <p className="mb-3 text-xs text-slate-400">Every extracted value traces back to a page and the original document text.</p>
+      <div className="flex flex-col">
+        {Object.entries(byField).map(([field, items]) => (
+          <FieldGroup key={field} field={field} items={items} sourceUrl={sourceUrl} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\ExamInfoCard.jsx ===
+import Card from "../../components/ui/Card";
+import { formatDate } from "../../utils/date";
+
+function Field({ label, value }) {
+  return (
+    <div>
+      <p className="text-xs text-slate-400">{label}</p>
+      <p className="mt-0.5 text-sm font-medium text-ink">{value || "Not specified"}</p>
+    </div>
+  );
+}
+
+export default function ExamInfoCard({ examName, info }) {
+  if (!info) return null;
+
+  return (
+    <Card>
+      <h2 className="mb-4 font-mono text-xs uppercase tracking-wide text-slate-400">Exam Information</h2>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Exam Name" value={examName} />
+        <Field label="Conducting Body" value={info.conductingBody} />
+        <Field label="Release / Notification Date" value={formatDate(info.releaseDate)} />
+        <Field label="Application Start Date" value={formatDate(info.applicationStartDate)} />
+        <Field label="Application End Date" value={formatDate(info.applicationEndDate)} />
+        <div>
+          <p className="text-xs text-slate-400">Examination Dates</p>
+          <div className="mt-0.5 flex flex-col gap-0.5">
+            {(info.examDates || []).length === 0 && (
+              <p className="text-sm font-medium text-ink">Not specified</p>
+            )}
+            {(info.examDates || []).map((dateRange, index) => (
+              <p key={index} className="text-sm font-medium text-ink">
+                {formatDate(dateRange.startDate)}
+                {dateRange.endDate && dateRange.endDate !== dateRange.startDate
+                  ? ` – ${formatDate(dateRange.endDate)}`
+                  : ""}
+              </p>
+            ))}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\Modal.jsx ===
+export default function Modal({ open, title, children, onClose }) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-ink/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-md rounded-2xl bg-surface p-6 shadow-soft">
+        <h3 className="font-display text-lg font-semibold text-ink">{title}</h3>
+        <div className="mt-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\RuleGroup.jsx ===
+function OperatorBadge({ op }) {
+  const isAnd = op === "AND";
+  return (
+    <span
+      className={`inline-flex items-center rounded-lg px-2.5 py-1 font-mono text-xs font-semibold tracking-wide ${
+        isAnd ? "bg-indigo-700 text-white" : "bg-amber-500 text-white"
+      }`}
+    >
+      {op}
+    </span>
+  );
+}
+
+function RuleRow({ rule }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg bg-slate-50 px-3 py-2 font-mono text-sm">
+      <span className="font-medium text-ink">{rule.attribute}</span>
+      <span className="rounded bg-surface px-1.5 py-0.5 text-xs text-gold ring-1 ring-inset ring-indigo-100">
+        {rule.operator}
+      </span>
+      <span className="text-slate-600">{rule.value}</span>
+    </div>
+  );
+}
+
+export default function RuleGroup({ group, depth = 0 }) {
+  if (!group) return null;
+  const rules = group.rules || [];
+  const childGroups = group.childGroups || [];
+
+  return (
+    <div className={`rounded-xl border ${depth === 0 ? "border-slate-200" : "border-slate-200/70"} bg-surface`}>
+      <div className="flex items-center gap-2 border-b border-slate-100 px-4 py-2.5">
+        <OperatorBadge op={group.logicalOperator} />
+        <span className="text-xs text-slate-400">
+          {rules.length} rule{rules.length === 1 ? "" : "s"}
+          {childGroups.length > 0 ? `, ${childGroups.length} nested group${childGroups.length === 1 ? "" : "s"}` : ""}
+        </span>
+      </div>
+      <div className="flex flex-col gap-2 p-4">
+        {rules.map((rule, i) => (
+          <RuleRow key={i} rule={rule} />
+        ))}
+        {rules.length === 0 && childGroups.length === 0 && (
+          <p className="text-xs text-slate-400">No direct rules in this group.</p>
+        )}
+        {childGroups.length > 0 && (
+          <div className="ml-1 flex flex-col gap-3 border-l-2 border-slate-200 pl-4">
+            {childGroups.map((cg, i) => (
+              <RuleGroup key={i} group={cg} depth={depth + 1} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\SourceInfoCard.jsx ===
+import { ExternalLink, FileText } from "lucide-react";
+import Card from "../../components/ui/Card";
+
+export default function SourceInfoCard({ source }) {
+  if (!source) return null;
+
+  return (
+    <Card>
+      <h2 className="mb-4 font-mono text-xs uppercase tracking-wide text-slate-400">Official Source</h2>
+      <div className="flex flex-col gap-3 text-sm">
+        <div>
+          <p className="text-xs text-slate-400">Source URL</p>
+          <p className="truncate text-ink">{source.url || "Not available"}</p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-400">Original Document</p>
+          <p className="flex items-center gap-1.5 text-ink">
+            <FileText size={14} className="shrink-0 text-slate-400" />
+            {source.document || "Not available"}
+          </p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-400">Extraction Created</p>
+          <p className="text-ink">{source.downloadedDate || "Not available"}</p>
+        </div>
+      </div>
+
+      {source.url && (
+        <div className="mt-4">
+          <a
+            href={source.url}
+            target="_blank"
+            rel="noreferrer"
+            className="flex w-fit items-center gap-1.5 rounded-xl px-3.5 py-2 text-sm font-medium text-gold ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
+          >
+            Open Official Source <ExternalLink size={14} />
+          </a>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\StatusBadge.jsx ===
+const META = {
+  PENDING_REVIEW: { label: "Pending Review", className: "border-amber-300 text-amber-600" },
+  APPROVED: { label: "Approved", className: "border-signal-200 text-signal-600" },
+  REJECTED: { label: "Rejected", className: "border-red-300 text-red-600" },
+  FAILED: { label: "Failed", className: "border-red-500 text-red-700" },
+};
+
+export default function StatusBadge({ status, size = "md" }) {
+  const sizeClasses = size === "sm" ? "text-[10px] px-2 py-1" : "text-[11px] px-2.5 py-1.5";
+  const base = `inline-flex items-center gap-2 border font-mono uppercase tracking-wide ${sizeClasses}`;
+  const meta = META[status] || {
+    label: status || "Unknown",
+    className: "border-slate-200 text-slate-500",
+  };
+
+  return (
+    <span className={`${base} ${meta.className}`}>
+      <span className="h-1.5 w-1.5 shrink-0 bg-current" />
+      {meta.label}
+    </span>
+  );
+}
+
+
+=== FILE: frontend\src\admin\components\ValidationPanel.jsx ===
+import { AlertCircle } from "lucide-react";
+
+const SEVERITY_STYLE = {
+  error: { dot: "bg-red-500", text: "text-red-700", label: "Blocks approval" },
+  warning: { dot: "bg-amber-500", text: "text-amber-700", label: "Verify" },
+  info: { dot: "bg-slate-400", text: "text-slate-600", label: "Note" },
+};
+
+// Accepts plain strings (legacy) or { severity, message, field } objects.
+export default function ValidationPanel({ issues = [] }) {
+  if (issues.length === 0) return null;
+
+  const items = issues.map((issue) =>
+    typeof issue === "string" ? { severity: "warning", message: issue } : issue
+  );
+  const hasError = items.some((item) => item.severity === "error");
+
+  return (
+    <div
+      className={`rounded-2xl border p-5 ${
+        hasError ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"
+      }`}
+    >
+      <div className={`flex items-center gap-2 ${hasError ? "text-red-600" : "text-amber-600"}`}>
+        <AlertCircle size={18} />
+        <h2 className="font-display text-base font-semibold">
+          Validation Issues
+          <span className="ml-2 text-xs font-normal opacity-70">
+            {items.length} item{items.length === 1 ? "" : "s"}
+          </span>
+        </h2>
+      </div>
+      <ul className="mt-3 flex flex-col gap-2">
+        {items.map((item, i) => {
+          const style = SEVERITY_STYLE[item.severity] || SEVERITY_STYLE.warning;
+          return (
+            <li key={i} className={`flex items-start gap-2 text-sm ${style.text}`}>
+              <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${style.dot}`} />
+              <span>
+                <span className="mr-2 rounded bg-white/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                  {style.label}
+                </span>
+                {item.message}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\admin\context\AdminAuthContext.jsx ===
+import { createContext, useContext, useEffect, useState } from "react";
+import * as adminAuthApi from "../api/adminAuth";
+import { getAdminToken, onAdminSessionExpired } from "../api/adminClient";
+
+const AdminAuthContext = createContext(null);
+
+export function AdminAuthProvider({ children }) {
+  const [admin, setAdmin] = useState(null);
+  // Only "checking" if there's a stored token to validate.
+  const [checking, setChecking] = useState(() => Boolean(getAdminToken()));
+
+  // A token sitting in localStorage proves nothing — ask the backend.
+  useEffect(() => {
+    let cancelled = false;
+    if (!getAdminToken()) {
+      setChecking(false);
+      return;
+    }
+    adminAuthApi
+      .fetchAdminSession()
+      .then((a) => {
+        if (!cancelled) setAdmin(a);
+      })
+      .catch(() => {
+        // 401s already cleared the session inside the client; anything else
+        // (e.g. backend down) leaves admin null, so the guard sends them to
+        // /login instead of showing a dashboard we can't back with data.
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Any later API call that comes back 401 (after a failed refresh) lands here.
+  useEffect(() => onAdminSessionExpired(() => setAdmin(null)), []);
+
+  async function login(credentials) {
+    const res = await adminAuthApi.adminLogin(credentials);
+    setAdmin(res.admin);
+    return res;
+  }
+
+  function logout() {
+    adminAuthApi.adminLogout();
+    setAdmin(null);
+  }
+
+  return (
+    <AdminAuthContext.Provider value={{ admin, checking, login, logout }}>
+      {children}
+    </AdminAuthContext.Provider>
+  );
+}
+
+export function useAdminAuth() {
+  const ctx = useContext(AdminAuthContext);
+  if (!ctx) throw new Error("useAdminAuth must be used within AdminAuthProvider");
+  return ctx;
+}
+
+=== FILE: frontend\src\admin\pages\AddExam.jsx ===
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { ExternalLink, Sparkles } from "lucide-react";
+import Card from "../../components/ui/Card";
+import { TextField } from "../../components/ui/Field";
+import Button from "../../components/ui/Button";
+import { createExamExtraction } from "../api/adminExtractions";
+
+export default function AddExam() {
+  const navigate = useNavigate();
+  const [examName, setExamName] = useState("");
+  const [error, setError] = useState("");
+  const [officialUrl, setOfficialUrl] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!examName.trim()) {
+      setError("Enter an exam name to start.");
+      setOfficialUrl(null);
+      return;
+    }
+    setError("");
+    setOfficialUrl(null);
+    setLoading(true);
+    try {
+      const extraction = await createExamExtraction(examName);
+      navigate(`/admin/extractions/${extraction.id}`);
+    } catch (err) {
+      setError(err?.message || "Something went wrong. Please try again.");
+      if (err?.code === "NO_NOTIFICATION_FOUND" && err.officialUrl) {
+        setOfficialUrl(err.officialUrl);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">Add Examination</h1>
+        <p className="mt-1.5 max-w-lg text-slate-600">
+          Provide only the exam name. NexStep discovers the official source, downloads the notification,
+          and extracts eligibility rules, dates, and syllabus automatically.
+        </p>
+      </div>
+
+      <Card className="max-w-lg">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+          {error && (
+            <div className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-amber-600 ring-1 ring-inset ring-amber-200">
+              <p>{error}</p>
+              {officialUrl && (
+                <a
+                  href={officialUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-2 inline-flex items-center gap-1.5 font-medium underline"
+                >
+                  Open official site <ExternalLink size={14} />
+                </a>
+              )}
+            </div>
+          )}
+          <TextField
+            id="examName"
+            label="Exam Name"
+            placeholder="e.g. Civil Services Examination 2026"
+            required
+            value={examName}
+            onChange={(e) => setExamName(e.target.value)}
+          />
+          <Button type="submit" loading={loading} className="w-full">
+            <Sparkles size={16} /> Start AI Discovery
+          </Button>
+        </form>
+      </Card>
+
+      <Card className="max-w-lg bg-indigo-50/50">
+        <p className="text-sm text-slate-600">
+          The admin should not manually enter eligibility rules, dates, source URLs, or PDFs — those
+          are discovered and extracted by the system, then presented here for your review before
+          anything becomes authoritative.
+        </p>
+      </Card>
+    </div>
+  );
+}
+
+=== FILE: frontend\src\admin\pages\AdminDashboard.jsx ===
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import Card from "../../components/ui/Card";
+import StatusBadge from "../components/StatusBadge";
+import { getDashboardStats } from "../api/adminExtractions";
+import { runMonitoring } from "../api/adminMonitoring";
+import { formatDate } from "../../utils/date";
+
+function StatCard({ label, value, accent }) {
+  return (
+    <Card className="flex flex-col gap-1">
+      <p className="text-sm text-slate-500">{label}</p>
+      <p className={`font-display text-3xl font-semibold ${accent || "text-ink"}`}>
+        {value}
+      </p>
+    </Card>
+  );
+}
+
+export default function AdminDashboard() {
+  const [stats, setStats] = useState(null);
+  const [error, setError] = useState("");
+
+  const [monitoringRunning, setMonitoringRunning] = useState(false);
+  const [monitoringResult, setMonitoringResult] = useState(null);
+  const [monitoringError, setMonitoringError] = useState("");
+
+  useEffect(() => {
+    getDashboardStats()
+      .then(setStats)
+      .catch((err) =>
+        setError(err.message || "Could not load dashboard data.")
+      );
+  }, []);
+
+  async function handleRunMonitoring() {
+    setMonitoringRunning(true);
+    setMonitoringError("");
+    setMonitoringResult(null);
+
+    try {
+      const response = await runMonitoring();
+
+      setMonitoringResult(response?.result || response);
+    } catch (err) {
+      setMonitoringError(
+        err.message || "Could not run the monitoring cycle."
+      );
+    } finally {
+      setMonitoringRunning(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-8">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          Admin Dashboard
+        </h1>
+        <p className="mt-1.5 text-slate-600">
+          Overview of the exam ingestion and extraction review pipeline.
+        </p>
+      </div>
+
+      {error && (
+        <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <StatCard
+          label="Pending Reviews"
+          value={stats?.pendingReviews ?? "—"}
+          accent="text-amber-600"
+        />
+        <StatCard
+          label="Approved Extractions"
+          value={stats?.approvedExams ?? "—"}
+          accent="text-signal-600"
+        />
+        <StatCard
+          label="Rejected Extractions"
+          value={stats?.rejectedExtractions ?? "—"}
+          accent="text-red-600"
+        />
+        <StatCard
+          label="Failed Extractions"
+          value={stats?.failedExtractions ?? "—"}
+          accent="text-red-700"
+        />
+      </div>
+
+      {/* Monitoring */}
+      <Card>
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="font-display text-base font-semibold text-ink">
+              Official Notification Monitoring
+            </h2>
+
+            <p className="mt-1 text-sm text-slate-500">
+              Check approved exam notifications for changes in their official
+              documents.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleRunMonitoring}
+            disabled={monitoringRunning}
+            className="rounded-xl bg-ink px-4 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {monitoringRunning ? "Running Monitoring..." : "Run Monitoring"}
+          </button>
+        </div>
+
+        {monitoringError && (
+          <div className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
+            {monitoringError}
+          </div>
+        )}
+
+        {monitoringResult && (
+          <div className="mt-5 rounded-xl border border-slate-100 bg-slate-50 p-4">
+            <p className="mb-3 text-sm font-semibold text-ink">
+              Monitoring completed
+            </p>
+
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <div>
+                <p className="text-xs text-slate-500">
+                  Notifications Found
+                </p>
+                <p className="mt-1 text-lg font-semibold text-ink">
+                  {monitoringResult.notifications_found ?? 0}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-xs text-slate-500">
+                  Notifications Processed
+                </p>
+                <p className="mt-1 text-lg font-semibold text-ink">
+                  {monitoringResult.notifications_processed ?? 0}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-xs text-slate-500">Successful</p>
+                <p className="mt-1 text-lg font-semibold text-signal-600">
+                  {monitoringResult.successful ?? 0}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-xs text-slate-500">Failed</p>
+                <p className="mt-1 text-lg font-semibold text-red-600">
+                  {monitoringResult.failed ?? 0}
+                </p>
+              </div>
+            </div>
+
+            {Array.isArray(monitoringResult.results) &&
+              monitoringResult.results.length > 0 && (
+                <div className="mt-5">
+                  <p className="mb-2 text-sm font-medium text-ink">
+                    Notification Results
+                  </p>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-400">
+                          <th className="pb-2 font-medium">
+                            Notification ID
+                          </th>
+                          <th className="pb-2 font-medium">
+                            Monitoring Status
+                          </th>
+                          <th className="pb-2 font-medium">
+                            Result
+                          </th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {monitoringResult.results.map((item) => (
+                          <tr
+                            key={item.notification_id}
+                            className="border-b border-slate-100 last:border-none"
+                          >
+                            <td className="py-3 font-medium text-ink">
+                              {item.notification_id}
+                            </td>
+
+                            <td className="py-3">
+                              <span
+                                className={
+                                  item.status === "SUCCESS"
+                                    ? "rounded-full bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700"
+                                    : "rounded-full bg-red-50 px-2.5 py-1 text-xs font-medium text-red-700"
+                                }
+                              >
+                                {item.status}
+                              </span>
+                            </td>
+
+                            <td className="py-3 text-slate-500">
+                              {item.result?.status ||
+                                item.error ||
+                                "Completed"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="font-display text-base font-semibold text-ink">
+            Recent activity
+          </h2>
+
+          <Link
+            to="/admin/extractions"
+            className="text-sm font-medium text-gold hover:underline"
+          >
+            View all
+          </Link>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-100 text-xs uppercase tracking-wide text-slate-400">
+                <th className="pb-2 font-medium">Exam</th>
+                <th className="pb-2 font-medium">Version</th>
+                <th className="pb-2 font-medium">Status</th>
+                <th className="pb-2 font-medium">Date</th>
+                <th className="pb-2 font-medium text-right">Action</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {stats?.recent?.map((row) => (
+                <tr
+                  key={row.id}
+                  className="border-b border-slate-50 last:border-none"
+                >
+                  <td className="py-3 font-medium text-ink">
+                    {row.examName}
+                  </td>
+
+                  <td className="py-3 text-slate-500">
+                    {row.version}
+                  </td>
+
+                  <td className="py-3">
+                    <StatusBadge status={row.status} size="sm" />
+                  </td>
+
+                  <td className="py-3 text-slate-500">
+                    {formatDate(row.createdDate)}
+                  </td>
+
+                  <td className="py-3 text-right">
+                    <Link
+                      to={`/admin/extractions/${row.id}`}
+                      className="font-medium text-gold hover:underline"
+                    >
+                      {row.status === "PENDING_REVIEW"
+                        ? "Review"
+                        : "View"}
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+=== FILE: frontend\src\admin\pages\AdminNotifications.jsx ===
+import { useCallback, useEffect, useState } from "react";
+import Card from "../../components/ui/Card";
+import Button from "../../components/ui/Button";
+import { formatDate } from "../../utils/date";
+import {
+  getNotificationLog,
+  getNotificationSummary,
+  retryNotificationEmail,
+  runDeadlineReminders,
+} from "../api/adminNotifications";
+
+const FILTERS = [
+  ["", "All"],
+  ["SENT", "Sent"],
+  ["FAILED", "Failed"],
+  ["SKIPPED", "Skipped"],
+  ["PENDING", "Pending"],
+];
+
+const TYPE_LABEL = {
+  NEW_ELIGIBLE_EXAM: "New eligible exam",
+  EXAM_UPDATED: "Exam updated",
+  DEADLINE_REMINDER: "Deadline reminder",
+  ELIGIBILITY_CHANGED: "Eligibility changed",
+};
+
+const STATUS_STYLE = {
+  SENT: "text-signal-600 bg-signal-50",
+  FAILED: "text-red-600 bg-red-50",
+  SKIPPED: "text-amber-600 bg-amber-50",
+  PENDING: "text-slate-500 bg-slate-100",
+};
+
+function StatCard({ label, value, accent = "text-ink" }) {
+  return (
+    <Card>
+      <p className="text-xs uppercase tracking-wide text-slate-400">{label}</p>
+      <p className={`mt-1 font-display text-2xl font-semibold ${accent}`}>{value ?? "—"}</p>
+    </Card>
+  );
+}
+
+export default function AdminNotifications() {
+  const [rows, setRows] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busyId, setBusyId] = useState(null);
+  const [running, setRunning] = useState(false);
+
+  const load = useCallback(async (emailStatus) => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const [log, stats] = await Promise.all([
+        getNotificationLog({ emailStatus }),
+        getNotificationSummary(),
+      ]);
+      setRows(log);
+      setSummary(stats);
+    } catch (err) {
+      setError(err?.message || "Could not load notifications.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    load(filter);
+  }, [filter, load]);
+
+  async function handleRetry(id) {
+    setBusyId(id);
+    setError("");
+    setNotice("");
+
+    try {
+      const result = await retryNotificationEmail(id);
+      setNotice(`Email status is now ${result?.email_status || "updated"}.`);
+      await load(filter);
+    } catch (err) {
+      setError(err?.message || "Could not retry the email.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRunReminders() {
+    setRunning(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const result = await runDeadlineReminders();
+      setNotice(`Deadline reminders ran: ${result?.created ?? 0} new notification(s) created.`);
+      await load(filter);
+    } catch (err) {
+      setError(err?.message || "Could not run deadline reminders.");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+            Notifications
+          </h1>
+          <p className="mt-1.5 max-w-xl text-slate-600">
+            Every notification sent to students, with its email delivery status. Retry any email
+            that failed or was skipped.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="secondary" className="text-sm" onClick={() => load(filter)}>
+            Refresh
+          </Button>
+          <Button
+            variant="secondary"
+            className="text-sm"
+            loading={running}
+            onClick={handleRunReminders}
+          >
+            Run deadline reminders now
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <StatCard label="Total" value={summary?.total} />
+        <StatCard label="Emails sent" value={summary?.sent} accent="text-signal-600" />
+        <StatCard label="Failed" value={summary?.failed} accent="text-red-600" />
+        <StatCard label="Skipped" value={summary?.skipped} accent="text-amber-600" />
+      </div>
+
+      {error && (
+        <p className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-amber-600 ring-1 ring-inset ring-amber-200">
+          {error}
+        </p>
+      )}
+      {notice && (
+        <p className="rounded-xl bg-signal-50 px-3.5 py-2.5 text-sm text-signal-600 ring-1 ring-inset ring-slate-200">
+          {notice}
+        </p>
+      )}
+
+      <Card>
+        <div className="mb-4 flex flex-wrap gap-2">
+          {FILTERS.map(([value, label]) => (
+            <button
+              key={value || "all"}
+              onClick={() => setFilter(value)}
+              className={`rounded-full px-3 py-1 text-xs font-medium ${
+                filter === value
+                  ? "bg-indigo-600 text-white"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-100 text-xs uppercase tracking-wide text-slate-400">
+                <th className="pb-2 font-medium">Student</th>
+                <th className="pb-2 font-medium">Notification</th>
+                <th className="pb-2 font-medium">Email</th>
+                <th className="pb-2 font-medium">Date</th>
+                <th className="pb-2 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {!loading && rows.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-6 text-center text-sm text-slate-400">
+                    No notifications match this view.
+                  </td>
+                </tr>
+              )}
+              {rows.map((row) => (
+                <tr key={row.id} className="border-b border-slate-50 align-top last:border-none">
+                  <td className="py-3 pr-3">
+                    <p className="font-medium text-ink">{row.studentName}</p>
+                    <p className="text-xs text-slate-400">{row.studentEmail}</p>
+                  </td>
+                  <td className="max-w-md py-3 pr-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                      {TYPE_LABEL[row.type] || row.type}
+                    </p>
+                    <p className="font-medium text-ink">{row.title}</p>
+                    <p className="mt-0.5 text-slate-500">{row.message}</p>
+                  </td>
+                  <td className="py-3 pr-3">
+                    {row.emailStatus ? (
+                      <span
+                        className={`rounded-full px-2.5 py-1 font-mono text-[11px] uppercase tracking-wide ${
+                          STATUS_STYLE[row.emailStatus] || STATUS_STYLE.PENDING
+                        }`}
+                      >
+                        {row.emailStatus}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-400">In-app only</span>
+                    )}
+                    {row.emailError && (
+                      <p className="mt-1 max-w-[14rem] text-xs text-slate-400">{row.emailError}</p>
+                    )}
+                  </td>
+                  <td className="py-3 pr-3 text-slate-500">
+                    {row.createdAt ? formatDate(row.createdAt) : "—"}
+                  </td>
+                  <td className="py-3 text-right">
+                    {(row.emailStatus === "FAILED" || row.emailStatus === "SKIPPED") && (
+                      <button
+                        disabled={busyId === row.id}
+                        onClick={() => handleRetry(row.id)}
+                        className="text-sm font-medium text-gold hover:underline disabled:opacity-50"
+                      >
+                        {busyId === row.id ? "Retrying…" : "Retry email"}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+=== FILE: frontend\src\admin\pages\AllExams.jsx ===
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import Card from "../../components/ui/Card";
+import { listApprovedExams } from "../api/adminExams";
+import { formatDate } from "../../utils/date";
+
+export default function AllExams() {
+  const [exams, setExams] = useState(undefined);
+
+  useEffect(() => {
+    listApprovedExams().then(setExams);
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">All Exams</h1>
+        <p className="mt-1.5 text-slate-600">Approved exams currently live as authoritative data.</p>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {exams?.length === 0 && (
+          <Card><p className="text-sm text-slate-500">No exams approved yet.</p></Card>
+        )}
+        {exams?.map((exam) => (
+          <Card key={exam.examId} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="font-display font-semibold text-ink">{exam.examName}</h3>
+              <p className="mt-1 text-sm text-slate-500">{exam.examInformation?.conductingBody}</p>
+              <p className="mt-1.5 font-mono text-xs text-slate-400">
+                Last updated {formatDate(exam.approvedDate)} · Version {exam.version}
+              </p>
+            </div>
+            <Link
+              to={`/admin/exams/${exam.examId}`}
+              className="shrink-0 rounded-xl px-4 py-2 text-center text-sm font-medium text-gold ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
+            >
+              View details
+            </Link>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\admin\pages\ExamDetailAdmin.jsx ===
+import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { ArrowLeft } from "lucide-react";
+import Card from "../../components/ui/Card";
+import StatusBadge from "../components/StatusBadge";
+import SourceInfoCard from "../components/SourceInfoCard";
+import ExamInfoCard from "../components/ExamInfoCard";
+import EligibilityInfoCard from "../components/EligibilityInfoCard";
+import RuleGroup from "../components/RuleGroup";
+import { getApprovedExamByExamId } from "../api/adminExams";
+import { formatDate } from "../../utils/date";
+
+export default function ExamDetailAdmin() {
+  const { examId } = useParams();
+  const [exam, setExam] = useState(undefined);
+
+  useEffect(() => {
+    let active = true;
+    setExam(undefined);
+    getApprovedExamByExamId(examId).then((data) => {
+      if (active) setExam(data);
+    });
+    return () => {
+      active = false;
+    };
+  }, [examId]);
+
+  if (exam === undefined) return <p className="text-sm text-slate-400">Loading exam...</p>;
+  if (exam === null) {
+    return (
+      <Card>
+        <p className="text-sm text-slate-500">No approved exam found for this id.</p>
+        <Link to="/admin/exams" className="mt-3 inline-block text-sm font-medium text-gold hover:underline">
+          Back to all exams
+        </Link>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <Link to="/admin/exams" className="flex w-fit items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-ink">
+        <ArrowLeft size={15} /> Back to all exams
+      </Link>
+
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">{exam.examName}</h1>
+        <StatusBadge status={exam.status} />
+      </div>
+
+      <SourceInfoCard source={exam.source} />
+      <ExamInfoCard examName={exam.examName} info={exam.examInformation} />
+      <EligibilityInfoCard info={exam.eligibilityInformation} />
+
+      <Card>
+        <h2 className="mb-4 font-mono text-xs uppercase tracking-wide text-slate-400">Eligibility Rules</h2>
+        <RuleGroup group={exam.eligibilityRules} />
+      </Card>
+
+      <Card className="flex flex-wrap gap-x-10 gap-y-2 text-sm">
+        <div>
+          <p className="text-xs text-slate-400">Last Updated</p>
+          <p className="font-medium text-ink">{formatDate(exam.approvedDate)}</p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-400">Extraction Version</p>
+          <p className="font-medium text-ink">{exam.version}</p>
+        </div>
+        <div>
+          <Link to={`/admin/extractions/${exam.id}`} className="font-medium text-gold hover:underline">
+            View source extraction
+          </Link>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\admin\pages\ExtractionDetail.jsx ===
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import {
+  ArrowLeft,
+  RotateCcw,
+  AlertOctagon,
+  AlertTriangle,
+} from "lucide-react";
+import Card from "../../components/ui/Card";
+import Button from "../../components/ui/Button";
+import { TextareaField } from "../../components/ui/Field";
+import StatusBadge from "../components/StatusBadge";
+import Modal from "../components/Modal";
+import SourceInfoCard from "../components/SourceInfoCard";
+import ExamInfoCard from "../components/ExamInfoCard";
+import EligibilityInfoCard from "../components/EligibilityInfoCard";
+import RuleGroup from "../components/RuleGroup";
+import EvidencePanel from "../components/EvidencePanel";
+import ConflictPanel from "../components/ConflictPanel";
+import ValidationPanel from "../components/ValidationPanel";
+import {
+  getExtractionById,
+  approveExtraction,
+  rejectExtraction,
+  retryExtraction,
+} from "../api/adminExtractions";
+import { formatDate } from "../../utils/date";
+
+export default function ExtractionDetail() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+
+  const [extraction, setExtraction] = useState(undefined);
+  const [showApprove, setShowApprove] = useState(false);
+  const [showReject, setShowReject] = useState(false);
+  const [rejectFeedback, setRejectFeedback] = useState("");
+  const [rejectError, setRejectError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    setExtraction(undefined);
+    setError("");
+
+    getExtractionById(id)
+      .then((data) => {
+        if (active) {
+          setExtraction(data);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          setError(
+            err.message || "Could not load extraction."
+          );
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [id]);
+
+  async function handleApprove() {
+    setBusy(true);
+
+    try {
+      await approveExtraction(id);
+
+      navigate(
+        extraction.examId
+          ? `/admin/exams/${extraction.examId}`
+          : "/admin/extractions"
+      );
+    } catch (err) {
+      setError(
+        err.message || "Failed to approve extraction."
+      );
+      setShowApprove(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleReject() {
+    if (!rejectFeedback.trim()) {
+      setRejectError(
+        "Feedback is required to reject the extraction."
+      );
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      await rejectExtraction(id, rejectFeedback);
+      navigate("/admin/extractions");
+    } catch (err) {
+      setRejectError(
+        err.message || "Failed to reject extraction."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRetry() {
+    setBusy(true);
+
+    try {
+      const retried = await retryExtraction(id);
+      navigate(`/admin/extractions/${retried.id}`);
+    } catch (err) {
+      setError(
+        err.message || "Failed to retry extraction."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (extraction === undefined) {
+    return (
+      <p className="text-sm text-slate-400">
+        Loading extraction...
+      </p>
+    );
+  }
+
+  if (extraction === null) {
+    return (
+      <Card>
+        <p className="text-sm text-slate-500">
+          We couldn't find that extraction.
+        </p>
+
+        <Link
+          to="/admin/extractions"
+          className="mt-3 inline-block text-sm font-medium text-gold hover:underline"
+        >
+          Back to extraction history
+        </Link>
+      </Card>
+    );
+  }
+
+  const backLink = (
+    <Link
+      to="/admin/extractions"
+      className="flex w-fit items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-ink"
+    >
+      <ArrowLeft size={15} />
+      Back to extraction history
+    </Link>
+  );
+
+  const header = (
+    <div className="flex flex-wrap items-start justify-between gap-4">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          {extraction.examName}
+        </h1>
+
+        <p className="mt-1 text-slate-500">
+          Extraction #{String(extraction.id)} · Version{" "}
+          {extraction.version}
+        </p>
+      </div>
+
+      <StatusBadge status={extraction.status} />
+    </div>
+  );
+
+  if (extraction.status === "FAILED") {
+    return (
+      <div className="flex flex-col gap-6">
+        {backLink}
+        {header}
+
+        <div className="rounded-2xl border-2 border-red-200 bg-red-50 p-5">
+          <div className="flex items-center gap-2 text-red-700">
+            <AlertOctagon size={18} />
+
+            <h2 className="font-display text-base font-semibold">
+              Extraction Failed
+            </h2>
+          </div>
+
+          <p className="mt-3 text-sm text-ink">
+            {extraction.changeDetails ||
+              "The backend reported that this extraction failed."}
+          </p>
+
+          <Button
+            onClick={handleRetry}
+            loading={busy}
+            className="mt-5"
+          >
+            <RotateCcw size={15} />
+            Retry
+          </Button>
+        </div>
+
+        {extraction.validationIssues?.length > 0 && (
+          <ValidationPanel
+            issues={extraction.validationIssues}
+          />
+        )}
+      </div>
+    );
+  }
+
+  const isPending =
+    extraction.status === "PENDING_REVIEW";
+
+  const isRejected =
+    extraction.status === "REJECTED";
+
+  const validationIssues =
+    extraction.validationIssues || [];
+
+  const blockingIssues =
+    validationIssues.filter(
+      (issue) => issue.severity === "error"
+    );
+
+  const hasBlockingIssues =
+    blockingIssues.length > 0;
+
+  const canApprove =
+    isPending && !hasBlockingIssues;
+
+  return (
+    <div className="flex flex-col gap-6 pb-10">
+      {backLink}
+
+      {header}
+
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {isRejected && extraction.rejectFeedback && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-5">
+          <p className="text-sm font-medium text-red-700">
+            Rejected with feedback
+          </p>
+
+          <p className="mt-1 text-sm text-red-600">
+            {extraction.rejectFeedback}
+          </p>
+        </div>
+      )}
+
+      {isPending && (
+        <ConflictPanel
+          conflicts={extraction.conflicts}
+        />
+      )}
+
+      {validationIssues.length > 0 && (
+        <ValidationPanel
+          issues={validationIssues}
+        />
+      )}
+
+      {isPending && hasBlockingIssues && (
+        <div className="rounded-2xl border-2 border-amber-200 bg-amber-50 p-5">
+          <div className="flex items-center gap-2 text-amber-700">
+            <AlertTriangle size={18} />
+
+            <h2 className="font-display text-base font-semibold">
+              Approval blocked
+            </h2>
+          </div>
+
+          <p className="mt-2 text-sm leading-6 text-amber-800">
+            This extraction contains{" "}
+            <span className="font-semibold">
+              {blockingIssues.length}
+            </span>{" "}
+            blocking validation{" "}
+            {blockingIssues.length === 1
+              ? "error"
+              : "errors"}
+            . Resolve the extraction through rejection
+            or retry before approving it.
+          </p>
+        </div>
+      )}
+
+      <SourceInfoCard
+        source={extraction.source}
+      />
+
+      <ExamInfoCard
+        examName={extraction.examName}
+        info={extraction.examInformation}
+      />
+
+      <EligibilityInfoCard
+        info={extraction.eligibilityInformation}
+      />
+
+      <Card>
+        <h2 className="mb-4 font-mono text-xs uppercase tracking-wide text-slate-400">
+          Eligibility Rule Tree
+        </h2>
+
+        <RuleGroup
+          group={extraction.eligibilityRules}
+        />
+      </Card>
+
+      <EvidencePanel
+        evidence={extraction.evidence}
+        sourceUrl={extraction.source?.url}
+      />
+
+      {extraction.aiSummary && (
+        <Card>
+          <h2 className="mb-2 font-mono text-xs uppercase tracking-wide text-slate-400">
+            AI Summary
+          </h2>
+
+          <p className="text-sm leading-6 text-slate-600">
+            {extraction.aiSummary}
+          </p>
+        </Card>
+      )}
+
+      {isRejected && (
+        <Card className="border-indigo-200 bg-indigo-50/50">
+          <h2 className="font-display text-base font-semibold text-ink">
+            AI Retry
+          </h2>
+
+          <p className="mb-1 mt-3 text-xs uppercase tracking-wide text-slate-400">
+            Previous administrator feedback
+          </p>
+
+          <p className="mb-4 text-sm text-slate-600">
+            "{extraction.rejectFeedback}"
+          </p>
+
+          <p className="mb-4 text-sm text-slate-500">
+            The backend will re-run extraction against the
+            original document and create a new pending
+            extraction.
+          </p>
+
+          <Button
+            onClick={handleRetry}
+            loading={busy}
+          >
+            <RotateCcw size={15} />
+            Retry Extraction
+          </Button>
+        </Card>
+      )}
+
+      {isPending && (
+        <div className="sticky bottom-4 flex justify-end gap-3 rounded-2xl border border-slate-200 bg-surface/95 p-4 shadow-card backdrop-blur">
+          <Button
+            variant="danger"
+            onClick={() => setShowReject(true)}
+            disabled={busy}
+          >
+            Reject
+          </Button>
+
+          <Button
+            onClick={() => setShowApprove(true)}
+            disabled={!canApprove || busy}
+          >
+            Approve
+          </Button>
+        </div>
+      )}
+
+      <Modal
+        open={showApprove}
+        title="Approve Extraction?"
+        onClose={() => setShowApprove(false)}
+      >
+        <p className="text-sm text-slate-600">
+          This extraction will become the authoritative
+          examination data for{" "}
+          <span className="font-medium text-ink">
+            {extraction.examName}
+          </span>
+          .
+        </p>
+
+        <div className="mt-6 flex justify-end gap-3">
+          <Button
+            variant="ghost"
+            onClick={() => setShowApprove(false)}
+          >
+            Cancel
+          </Button>
+
+          <Button
+            onClick={handleApprove}
+            loading={busy}
+            disabled={!canApprove}
+          >
+            Confirm Approval
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showReject}
+        title="Reject Extraction"
+        onClose={() => setShowReject(false)}
+      >
+        <TextareaField
+          id="rejectFeedback"
+          label="Reason / Feedback"
+          required
+          placeholder="e.g. Application end date is incorrect. Please re-check the official notification."
+          value={rejectFeedback}
+          error={rejectError}
+          onChange={(e) => {
+            setRejectFeedback(e.target.value);
+            setRejectError("");
+          }}
+        />
+
+        <div className="mt-6 flex justify-end gap-3">
+          <Button
+            variant="ghost"
+            onClick={() => setShowReject(false)}
+          >
+            Cancel
+          </Button>
+
+          <Button
+            variant="danger"
+            onClick={handleReject}
+            loading={busy}
+          >
+            Reject Extraction
+          </Button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+=== FILE: frontend\src\admin\pages\ExtractionHistory.jsx ===
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Search } from "lucide-react";
+import Card from "../../components/ui/Card";
+import StatusBadge from "../components/StatusBadge";
+import { listExtractions } from "../api/adminExtractions";
+import { formatDate } from "../../utils/date";
+
+const FILTERS = ["All", "PENDING_REVIEW", "APPROVED", "REJECTED", "FAILED"];
+const FILTER_LABELS = { All: "All", PENDING_REVIEW: "Pending", APPROVED: "Approved", REJECTED: "Rejected", FAILED: "Failed" };
+
+export default function ExtractionHistory() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = searchParams.get("status") || "All";
+  const [query, setQuery] = useState("");
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    listExtractions({ status }).then((data) => {
+      setRows(data);
+      setLoading(false);
+    });
+  }, [status]);
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return rows;
+    const q = query.trim().toLowerCase();
+    return rows.filter((r) => r.examName.toLowerCase().includes(q));
+  }, [rows, query]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">Extraction History</h1>
+        <p className="mt-1.5 text-slate-600">Every extraction ever generated, across every version.</p>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-2">
+          {FILTERS.map((f) => (
+            <button
+              key={f}
+              onClick={() => setSearchParams(f === "All" ? {} : { status: f })}
+              className={`rounded-xl px-3.5 py-1.5 text-sm font-medium transition ${
+                status === f ? "bg-indigo-700 text-white" : "bg-surface text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+              }`}
+            >
+              {FILTER_LABELS[f]}
+            </button>
+          ))}
+        </div>
+        <div className="relative">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search exam name..."
+            className="w-56 rounded-xl border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm text-ink placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+          />
+        </div>
+      </div>
+
+      <Card>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-100 text-xs uppercase tracking-wide text-slate-400">
+                <th className="pb-2 font-medium">Exam</th>
+                <th className="pb-2 font-medium">Version</th>
+                <th className="pb-2 font-medium">Status</th>
+                <th className="pb-2 font-medium">Created</th>
+                <th className="pb-2 font-medium text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!loading && filtered.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-6 text-center text-sm text-slate-400">No extractions match this view.</td>
+                </tr>
+              )}
+              {filtered.map((row) => (
+                <tr key={row.id} className="border-b border-slate-50 last:border-none">
+                  <td className="py-3 font-medium text-ink">{row.examName}</td>
+                  <td className="py-3 text-slate-500">{row.version}</td>
+                  <td className="py-3"><StatusBadge status={row.status} size="sm" /></td>
+                  <td className="py-3 text-slate-500">{formatDate(row.createdDate)}</td>
+                  <td className="py-3 text-right">
+                    <Link to={`/admin/extractions/${row.id}`} className="font-medium text-gold hover:underline">
+                      {row.status === "PENDING_REVIEW" ? "Review" : "View"}
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\admin\pages\MonitoringReviewDetail.jsx ===
+import { useEffect, useState } from "react";
+import {
+  Link,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
+
+import Card from "../../components/ui/Card";
+
+import {
+  getMonitoringReview,
+  approveMonitoringReview,
+  rejectMonitoringReview,
+  applyMonitoringReview,
+} from "../api/adminMonitoring";
+
+function StatusPill({ status }) {
+  const styles = {
+    PENDING: "bg-amber-50 text-amber-700",
+    APPROVED: "bg-green-50 text-green-700",
+    REJECTED: "bg-red-50 text-red-700",
+  };
+
+  return (
+    <span
+      className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+        styles[status] ||
+        "bg-slate-100 text-slate-600"
+      }`}
+    >
+      {status}
+    </span>
+  );
+}
+
+function SectionTitle({ children }) {
+  return (
+    <h2 className="font-display text-lg font-semibold text-ink">
+      {children}
+    </h2>
+  );
+}
+
+function HashBlock({ label, value }) {
+  return (
+    <div>
+      <p className="text-xs uppercase tracking-wide text-slate-400">
+        {label}
+      </p>
+
+      <p className="mt-1 break-all rounded-lg bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700">
+        {value || "—"}
+      </p>
+    </div>
+  );
+}
+
+function JsonValue({ value }) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return (
+      <span className="text-slate-400">
+        —
+      </span>
+    );
+  }
+
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return (
+      <span className="whitespace-pre-wrap text-sm text-slate-700">
+        {String(value)}
+      </span>
+    );
+  }
+
+  return (
+    <pre className="overflow-x-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-4 text-xs leading-5 text-slate-700">
+      {JSON.stringify(value, null, 2)}
+    </pre>
+  );
+}
+
+export default function MonitoringReviewDetail() {
+  const { reviewId } = useParams();
+  const navigate = useNavigate();
+
+  const [review, setReview] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [rejectionReason, setRejectionReason] =
+    useState("");
+
+  async function loadReview() {
+    try {
+      setLoading(true);
+      setError("");
+
+      const data =
+        await getMonitoringReview(reviewId);
+
+      setReview(data);
+    } catch (err) {
+      setError(
+        err.message ||
+          "Could not load monitoring review."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadReview();
+  }, [reviewId]);
+
+  async function handleApprove() {
+    if (
+      !window.confirm(
+        "Approve this monitoring change?"
+      )
+    ) {
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setError("");
+
+      await approveMonitoringReview(reviewId);
+
+      await loadReview();
+    } catch (err) {
+      setError(
+        err.message ||
+          "Could not approve monitoring review."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleReject() {
+    const reason =
+      rejectionReason.trim();
+
+    if (!reason) {
+      setError(
+        "Please enter a rejection reason."
+      );
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setError("");
+
+      await rejectMonitoringReview(
+        reviewId,
+        reason
+      );
+
+      setRejectionReason("");
+
+      await loadReview();
+    } catch (err) {
+      setError(
+        err.message ||
+          "Could not reject monitoring review."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleApply() {
+    if (
+      !window.confirm(
+        "Publish this approved monitoring change into the authoritative exam data?"
+      )
+    ) {
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setError("");
+
+      await applyMonitoringReview(reviewId);
+
+      await loadReview();
+    } catch (err) {
+      setError(
+        err.message ||
+          "Could not apply monitoring review."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <Card>
+        <p className="text-sm text-slate-500">
+          Loading monitoring review...
+        </p>
+      </Card>
+    );
+  }
+
+  if (!review) {
+    return (
+      <Card>
+        <p className="text-sm text-red-600">
+          {error ||
+            "Monitoring review not found."}
+        </p>
+      </Card>
+    );
+  }
+
+  const structuralChanges =
+    review.structural_changes;
+
+  const semanticAnalysis =
+    review.semantic_analysis;
+
+  const impactAnalysis =
+    review.impact_analysis;
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Header */}
+      <div>
+        <Link
+          to="/admin/monitoring"
+          className="text-sm font-medium text-gold hover:underline"
+        >
+          ← Back to Monitoring Reviews
+        </Link>
+
+        <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+                {review.exam_name}
+              </h1>
+
+              <StatusPill
+                status={
+                  review.review_status
+                }
+              />
+            </div>
+
+            <p className="mt-1.5 text-slate-600">
+              Notification #
+              {review.notification_id}
+
+              {review.notification_title
+                ? ` • ${review.notification_title}`
+                : ""}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {/* Document Change */}
+      <Card>
+        <SectionTitle>
+          Document Change
+        </SectionTitle>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <HashBlock
+            label="Previous document hash"
+            value={
+              review.old_document_hash
+            }
+          />
+
+          <HashBlock
+            label="New document hash"
+            value={
+              review.new_document_hash
+            }
+          />
+        </div>
+
+        {review.document_url && (
+          <div className="mt-4">
+            <p className="text-xs uppercase tracking-wide text-slate-400">
+              Official document URL
+            </p>
+
+            <a
+              href={review.document_url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 block break-all text-sm text-gold hover:underline"
+            >
+              {review.document_url}
+            </a>
+          </div>
+        )}
+      </Card>
+
+      {/* Structural Changes */}
+      <Card>
+        <SectionTitle>
+          Structural Changes
+        </SectionTitle>
+
+        <div className="mt-4">
+          {structuralChanges?.changes?.length ? (
+            <div className="flex flex-col gap-4">
+              {structuralChanges.changes.map(
+                (change, index) => (
+                  <div
+                    key={
+                      change.change_index ??
+                      index
+                    }
+                    className="rounded-xl border border-slate-200 p-4"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                        Change #
+                        {change.change_index ??
+                          index}
+                      </span>
+
+                      <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700">
+                        {change.change_type}
+                      </span>
+                    </div>
+
+                    <p className="mt-3 text-xs font-medium uppercase tracking-wide text-slate-400">
+                      Path
+                    </p>
+
+                    <p className="mt-1 break-all font-mono text-xs text-slate-700">
+                      {change.path}
+                    </p>
+
+                    <div className="mt-4 grid gap-4 md:grid-cols-2">
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                          Previous value
+                        </p>
+
+                        <JsonValue
+                          value={
+                            change.old_value
+                          }
+                        />
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                          New value
+                        </p>
+
+                        <JsonValue
+                          value={
+                            change.new_value
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )
+              )}
+            </div>
+          ) : (
+            <JsonValue
+              value={structuralChanges}
+            />
+          )}
+        </div>
+      </Card>
+
+      {/* AI Semantic Analysis */}
+      <Card>
+        <SectionTitle>
+          AI Semantic Analysis
+        </SectionTitle>
+
+        {semanticAnalysis?.overall_summary && (
+          <div className="mt-4 rounded-xl bg-slate-50 p-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Overall Summary
+            </p>
+
+            <p className="mt-1 text-sm leading-6 text-slate-700">
+              {
+                semanticAnalysis.overall_summary
+              }
+            </p>
+          </div>
+        )}
+
+        <div className="mt-4 flex flex-col gap-4">
+          {semanticAnalysis?.changes?.map(
+            (change) => (
+              <div
+                key={
+                  change.change_index
+                }
+                className="rounded-xl border border-slate-200 p-4"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                    Change #
+                    {change.change_index}
+                  </span>
+
+                  <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700">
+                    {change.confidence}
+                  </span>
+
+                  {change.requires_human_review && (
+                    <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700">
+                      Human review
+                    </span>
+                  )}
+                </div>
+
+                <h3 className="mt-3 font-semibold text-ink">
+                  {change.summary}
+                </h3>
+
+                <p className="mt-2 text-sm text-slate-600">
+                  <strong>
+                    Affected requirement:
+                  </strong>{" "}
+                  {
+                    change.affected_requirement
+                  }
+                </p>
+
+                <p className="mt-2 text-sm text-slate-600">
+                  <strong>
+                    Potential impact:
+                  </strong>{" "}
+                  {change.impact}
+                </p>
+
+                <p className="mt-3 text-sm leading-6 text-slate-700">
+                  {change.explanation}
+                </p>
+              </div>
+            )
+          )}
+        </div>
+      </Card>
+
+      {/* Impact Analysis */}
+      <Card>
+        <SectionTitle>
+          Impact Analysis
+        </SectionTitle>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <div className="rounded-xl bg-slate-50 p-4">
+            <p className="text-xs uppercase tracking-wide text-slate-400">
+              Human review
+            </p>
+
+            <p className="mt-1 font-semibold text-ink">
+              {impactAnalysis?.overall_requires_human_review
+                ? "Required"
+                : "Not required"}
+            </p>
+          </div>
+
+          <div className="rounded-xl bg-slate-50 p-4">
+            <p className="text-xs uppercase tracking-wide text-slate-400">
+              Eligibility re-evaluation
+            </p>
+
+            <p className="mt-1 font-semibold text-ink">
+              {impactAnalysis?.overall_requires_eligibility_re_evaluation
+                ? "Required"
+                : "Not required"}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <JsonValue
+            value={impactAnalysis}
+          />
+        </div>
+      </Card>
+
+      {/* Pending Decision */}
+      {review.review_status ===
+        "PENDING" && (
+        <Card>
+          <SectionTitle>
+            Administrator Decision
+          </SectionTitle>
+
+          <div className="mt-4 flex flex-col gap-4">
+            {/* Approve */}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={handleApprove}
+              className="rounded-xl bg-green-700 px-4 py-3 text-sm font-semibold text-white hover:bg-green-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {busy
+                ? "Processing..."
+                : "Approve Change"}
+            </button>
+
+            {/* Reject */}
+            <div className="border-t border-slate-100 pt-4">
+              <label className="text-sm font-medium text-ink">
+                Rejection reason
+              </label>
+
+              <textarea
+                value={rejectionReason}
+                onChange={(event) =>
+                  setRejectionReason(
+                    event.target.value
+                  )
+                }
+                rows={4}
+                placeholder="Explain why this detected change should be rejected..."
+                className="mt-2 w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-slate-400"
+              />
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleReject}
+                className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy
+                  ? "Processing..."
+                  : "Reject Change"}
+              </button>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Approved */}
+      {review.review_status ===
+        "APPROVED" && (
+        <Card>
+          <SectionTitle>
+            Publish Approved Change
+          </SectionTitle>
+
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            The administrator has approved this
+            monitoring review. Publishing will update
+            the authoritative exam notification and
+            persist the newly extracted information.
+          </p>
+
+          <button
+            type="button"
+            disabled={busy}
+            onClick={handleApply}
+            className="mt-4 rounded-xl bg-ink px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {busy
+              ? "Publishing..."
+              : "Apply & Publish Change"}
+          </button>
+        </Card>
+      )}
+
+      {/* Rejected */}
+      {review.review_status ===
+        "REJECTED" &&
+        review.rejection_reason && (
+          <Card>
+            <SectionTitle>
+              Rejection Reason
+            </SectionTitle>
+
+            <p className="mt-3 rounded-xl bg-red-50 p-4 text-sm leading-6 text-red-700">
+              {review.rejection_reason}
+            </p>
+          </Card>
+        )}
+    </div>
+  );
+}
+
+=== FILE: frontend\src\admin\pages\MonitoringReviews.jsx ===
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import Card from "../../components/ui/Card";
+import { getMonitoringReviews } from "../api/adminMonitoring";
+
+function StatusPill({ status }) {
+  const styles = {
+    PENDING: "bg-amber-50 text-amber-700",
+    APPROVED: "bg-green-50 text-green-700",
+    REJECTED: "bg-red-50 text-red-700",
+  };
+
+  return (
+    <span
+      className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+        styles[status] || "bg-slate-100 text-slate-600"
+      }`}
+    >
+      {status}
+    </span>
+  );
+}
+
+function formatDate(value) {
+  if (!value) return "—";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toLocaleString();
+}
+
+export default function MonitoringReviews() {
+  const [reviews, setReviews] = useState([]);
+  const [filter, setFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  async function loadReviews() {
+    try {
+      setLoading(true);
+      setError("");
+
+      const data = await getMonitoringReviews(
+        filter || undefined
+      );
+
+      setReviews(
+        Array.isArray(data)
+          ? data
+          : []
+      );
+    } catch (err) {
+      setError(
+        err.message ||
+          "Could not load monitoring reviews."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadReviews();
+  }, [filter]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      {/* Page Header */}
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          Monitoring Reviews
+        </h1>
+
+        <p className="mt-1.5 text-slate-600">
+          Review changes detected in official exam
+          notifications before they are published.
+        </p>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap gap-2">
+        {[
+          ["", "All"],
+          ["PENDING", "Pending"],
+          ["APPROVED", "Approved"],
+          ["REJECTED", "Rejected"],
+        ].map(([value, label]) => (
+          <button
+            key={value || "all"}
+            type="button"
+            onClick={() => setFilter(value)}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              filter === value
+                ? "bg-ink text-white"
+                : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      {/* Loading */}
+      {loading ? (
+        <Card>
+          <p className="text-sm text-slate-500">
+            Loading monitoring reviews...
+          </p>
+        </Card>
+      ) : reviews.length === 0 ? (
+        /* Empty State */
+        <Card>
+          <div className="py-8 text-center">
+            <h2 className="font-display text-lg font-semibold text-ink">
+              No monitoring reviews
+            </h2>
+
+            <p className="mt-1 text-sm text-slate-500">
+              No document changes have been queued
+              for review.
+            </p>
+          </div>
+        </Card>
+      ) : (
+        /* Review List */
+        <div className="flex flex-col gap-4">
+          {reviews.map((review) => (
+            <Card key={review.review_id}>
+              <div className="flex flex-col gap-5">
+                {/* Review Header */}
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <h2 className="font-display text-lg font-semibold text-ink">
+                        {review.exam_name}
+                      </h2>
+
+                      <StatusPill
+                        status={review.review_status}
+                      />
+                    </div>
+
+                    <p className="mt-1 text-sm text-slate-500">
+                      Notification #{review.notification_id}
+
+                      {review.notification_title
+                        ? ` • ${review.notification_title}`
+                        : ""}
+                    </p>
+                  </div>
+
+                  {/* FIXED VIEW CHANGES LINK */}
+                  <Link
+                    to={`/admin/monitoring/reviews/${review.review_id}`}
+                    className="rounded-xl bg-ink px-4 py-2 text-center text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    View Changes
+                  </Link>
+                </div>
+
+                {/* Review Metadata */}
+                <div className="grid gap-4 border-t border-slate-100 pt-4 md:grid-cols-4">
+                  {/* Changes */}
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">
+                      Changes
+                    </p>
+
+                    <p className="mt-1 text-sm font-semibold text-ink">
+                      {review.change_count ?? "—"}
+                    </p>
+                  </div>
+
+                  {/* Human Review */}
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">
+                      Human Review
+                    </p>
+
+                    <p className="mt-1 text-sm font-semibold text-ink">
+                      {review.requires_human_review === true
+                        ? "Required"
+                        : review.requires_human_review === false
+                        ? "Not required"
+                        : "—"}
+                    </p>
+                  </div>
+
+                  {/* Eligibility */}
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">
+                      Eligibility
+                    </p>
+
+                    <p className="mt-1 text-sm font-semibold text-ink">
+                      {review.requires_eligibility_re_evaluation ===
+                      true
+                        ? "Re-evaluation required"
+                        : review.requires_eligibility_re_evaluation ===
+                          false
+                        ? "No re-evaluation"
+                        : "—"}
+                    </p>
+                  </div>
+
+                  {/* Detection Date */}
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">
+                      Detected
+                    </p>
+
+                    <p className="mt-1 text-sm text-slate-600">
+                      {formatDate(review.created_at)}
+                    </p>
+                  </div>
+                </div>
+
+                {/* AI Summary */}
+                {review.semantic_summary && (
+                  <div className="rounded-xl bg-slate-50 px-4 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                      AI Summary
+                    </p>
+
+                    <p className="mt-1 text-sm leading-6 text-slate-700">
+                      {review.semantic_summary}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+=== FILE: frontend\src\admin\routes\AdminProtectedRoute.jsx ===
+import { Navigate, Outlet } from "react-router-dom";
+import { useAdminAuth } from "../context/AdminAuthContext";
+
+export function RequireAdminAuth() {
+  const { admin, checking } = useAdminAuth();
+  if (checking) return null;
+  if (!admin) return <Navigate to="/login" replace />;
+  return <Outlet />;
+}

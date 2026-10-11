@@ -51,9 +51,9 @@ def script(overrides=None):
     return fn
 
 
-def run(overrides=None, providers=None):
+def run(overrides=None, providers=None, doc=None):
     p = providers or [ScriptedProvider(script(overrides))]
-    return run_extraction(DOC, manager=AIProviderManager(providers=p))
+    return run_extraction(doc or DOC, manager=AIProviderManager(providers=p))
 
 
 def rules_of(r):
@@ -85,13 +85,34 @@ def test_hallucinated_date_is_dropped_not_stored():
     assert any(i.code == "date-not-in-document" for i in r.issues)
 
 
-def test_age_without_reference_date_creates_no_guessed_rule():
-    def no_ref(task, out, c):
-        if task == "eligibility":
-            for a in out["age_limits"]:
-                a["as_on_date"] = None
-            return out
-    r = run(no_ref)
+def _drop_reference_date(task, out, c):
+    if task == "eligibility":
+        for a in out["age_limits"]:
+            a["as_on_date"] = None
+        return out
+
+
+def test_age_reference_date_the_model_left_out_is_read_from_the_notice():
+    # The notice itself says "as on 1 January 2026" in the age sentence, and
+    # it is the only such date, so using it is reading, not guessing. The
+    # reviewer is told where the date came from.
+    r = run(_drop_reference_date)
+    rules = rules_of(r)
+    assert ("Date of Birth", "<=", "2008-01-01") in rules
+    assert ("Date of Birth", ">=", "1998-01-02") in rules
+    assert any(i.code == "age-reference-from-notice" for i in r.issues)
+
+
+def test_age_without_any_reference_date_creates_no_guessed_rule():
+    no_date = parse_text_pages([
+        "Staff Selection Notification 2026\nIssued by Example Recruitment Board\nNotification date: 1 June 2026",
+        "Important Dates\nOnline applications open on 10 June 2026\nLast date to apply: 30 June 2026\n"
+        "Written examination on 15 and 16 August 2026",
+        "Eligibility Criteria\nNationality: Candidates must be citizens of India.\n"
+        "Age limit: 18 to 27 years.\n"
+        "Qualification: A Bachelor's degree from a recognised university with at least 60% marks.",
+    ])
+    r = run(_drop_reference_date, doc=no_date)
     assert not [x for x in rules_of(r) if x[0] == "Date of Birth"]
     assert any("reference date" in i.message.lower() or "as on" in i.message.lower() for i in r.issues)
 
@@ -135,3 +156,4 @@ def test_all_providers_failing_raises_cleanly():
             raise AIProviderUnavailableError("down")
     with pytest.raises(ExtractionError):
         run(providers=[Broken()])
+

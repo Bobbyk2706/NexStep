@@ -9,6 +9,9 @@ from app.services.exam_service import (
     get_exam_by_id,
     search_exams,
 )
+from app.services.eligibility_info_service import (
+    get_eligibility_info,
+)
 from app.services.official_notification_service import (
     get_latest_approved_notification,
 )
@@ -108,4 +111,7 @@ def get_exam(exam_id: int):
         "status": exam.status,
         "conducting_body": exam.body,
         "latest_approved_notification": notification,
+        "eligibility_info": get_eligibility_info(
+            notification.notification_id
+        ),
     }

@@ -17,6 +17,7 @@ from app.ai.complete_extraction_validation import (
 from app.ai.extraction_serialization import (
     deserialize_aggregated_extraction,
 )
+from app.ai.manual_eligibility import NO_RULE_GROUP_MESSAGE
 from app.database.session import SessionLocal
 from app.models.eligibility_rule import EligibilityRule
 from app.models.eligibility_rule_group import (
@@ -28,9 +29,14 @@ from app.models.official_notification import OfficialNotification
 from app.services.eligibility_rule_service import (
     _create_rule_group_recursive,
 )
+from app.services.notification_services import (
+    queue_new_exam_notifications,
+)
 
-from app.services.notification_services import queue_new_exam_notifications
 
+# ============================================================
+# DATE PARSING
+# ============================================================
 
 def _parse_date(
     value: str | None,
@@ -47,6 +53,10 @@ def _parse_date(
 
     return date.fromisoformat(value)
 
+
+# ============================================================
+# LOCK EXTRACTION
+# ============================================================
 
 def _get_locked_extraction(
     session: Session,
@@ -72,6 +82,10 @@ def _get_locked_extraction(
 
     return extraction
 
+
+# ============================================================
+# LOCK NOTIFICATION
+# ============================================================
 
 def _get_locked_notification(
     session: Session,
@@ -100,6 +114,10 @@ def _get_locked_notification(
 
     return notification
 
+
+# ============================================================
+# LATEST EXTRACTION CHECK
+# ============================================================
 
 def _ensure_latest_extraction(
     session: Session,
@@ -144,6 +162,10 @@ def _ensure_latest_extraction(
         )
 
 
+# ============================================================
+# DELETE EXISTING ELIGIBILITY TREE
+# ============================================================
+
 def _delete_existing_eligibility_tree(
     session: Session,
     notification_id: int,
@@ -157,7 +179,9 @@ def _delete_existing_eligibility_tree(
     """
 
     group_ids = session.scalars(
-        select(EligibilityRuleGroup.group_id)
+        select(
+            EligibilityRuleGroup.group_id
+        )
         .where(
             EligibilityRuleGroup.notification_id
             == notification_id
@@ -185,6 +209,10 @@ def _delete_existing_eligibility_tree(
 
     session.flush()
 
+
+# ============================================================
+# REPLACE EXAM DATES
+# ============================================================
 
 def _replace_exam_dates(
     session: Session,
@@ -240,6 +268,10 @@ def _replace_exam_dates(
     session.flush()
 
 
+# ============================================================
+# PERSIST ELIGIBILITY TREE
+# ============================================================
+
 def _persist_eligibility_tree(
     session: Session,
     notification_id: int,
@@ -277,6 +309,10 @@ def _persist_eligibility_tree(
     session.flush()
 
 
+# ============================================================
+# PERSIST APPROVED EXTRACTION
+# ============================================================
+
 def persist_approved_extraction(
     session: Session,
     extraction_history: ExtractionHistory,
@@ -287,6 +323,9 @@ def persist_approved_extraction(
     notification and eligibility tables.
 
     This function assumes validation has already succeeded.
+
+    It must only be called by the approval transaction after
+    the administrator explicitly approves the extraction.
     """
 
     notification = _get_locked_notification(
@@ -347,6 +386,10 @@ def persist_approved_extraction(
     session.flush()
 
 
+# ============================================================
+# APPROVE WITH EXISTING SESSION
+# ============================================================
+
 def approve_extraction_with_session(
     session: Session,
     extraction_id: int,
@@ -354,17 +397,23 @@ def approve_extraction_with_session(
     """
     Approve an extraction inside an existing transaction.
 
+    Approval can only happen when an administrator explicitly
+    invokes the approval action.
+
     Order:
 
         1. Load and lock extraction.
         2. Ensure extraction is PENDING.
         3. Lock its notification.
         4. Verify this extraction is latest.
-        5. Deserialize extraction.
-        6. Normalize extraction.
-        7. Validate normalized extraction.
-        8. Persist approved data.
-        9. Return without committing.
+        5. Ensure extraction content exists.
+        6. Deserialize stored extraction.
+        7. Normalize CompleteExtractionData.
+        8. Preserve all AggregatedExtractionResult metadata.
+        9. Validate normalized extraction.
+       10. Refuse approval if validation fails.
+       11. Persist authoritative data.
+       12. Return without committing.
 
     The caller owns the transaction commit/rollback.
     """
@@ -388,10 +437,10 @@ def approve_extraction_with_session(
         )
 
     # ---------------------------------------------------------
-    # 3. Lock the parent notification
+    # 3. Lock parent notification
     # ---------------------------------------------------------
 
-    _get_locked_notification(
+    notification = _get_locked_notification(
         session=session,
         notification_id=extraction.notification_id,
     )
@@ -415,7 +464,7 @@ def approve_extraction_with_session(
         )
 
     # ---------------------------------------------------------
-    # 6. Deserialize
+    # 6. Deserialize complete stored result
     # ---------------------------------------------------------
 
     extraction_result = (
@@ -425,7 +474,7 @@ def approve_extraction_with_session(
     )
 
     # ---------------------------------------------------------
-    # 7. Normalize ONLY the CompleteExtractionData
+    # 7. Normalize ONLY CompleteExtractionData
     # ---------------------------------------------------------
 
     normalized_extraction = (
@@ -434,15 +483,30 @@ def approve_extraction_with_session(
         )
     )
 
-    # Preserve the evidence/provenance while replacing
-    # the extraction with its normalized representation.
+    # ---------------------------------------------------------
+    # 8. Preserve the COMPLETE aggregated result
+    # ---------------------------------------------------------
+    #
+    # Do not throw away:
+    #
+    #   - evidence
+    #   - conflicts
+    #   - issues
+    #   - pipeline metadata
+    #
+    # Only replace the extraction itself with its normalized
+    # representation.
+
     normalized_result = AggregatedExtractionResult(
         extraction=normalized_extraction,
         evidence=extraction_result.evidence,
+        conflicts=extraction_result.conflicts,
+        issues=extraction_result.issues,
+        pipeline=extraction_result.pipeline,
     )
 
     # ---------------------------------------------------------
-    # 8. Validate normalized extraction
+    # 9. Validate normalized extraction
     # ---------------------------------------------------------
 
     validation_errors = (
@@ -451,6 +515,20 @@ def approve_extraction_with_session(
         )
     )
 
+    # An administrator may knowingly approve an exam whose notification
+    # states no eligibility. Only that one message is waived, and only
+    # when they said so explicitly on the extraction page.
+    if normalized_result.pipeline.get("eligibility_not_available"):
+        validation_errors = [
+            error
+            for error in validation_errors
+            if error != NO_RULE_GROUP_MESSAGE
+        ]
+
+    # ---------------------------------------------------------
+    # 10. NEVER persist invalid extraction
+    # ---------------------------------------------------------
+
     if validation_errors:
         raise ValueError(
             "Extraction failed validation: "
@@ -458,7 +536,30 @@ def approve_extraction_with_session(
         )
 
     # ---------------------------------------------------------
-    # 9. Persist ONLY after all validation succeeds
+    # Also refuse approval when the stored result contains
+    # blocking extraction issues.
+    #
+    # These are errors generated by the extraction pipeline,
+    # such as grounding, extraction, or validation problems.
+    # ---------------------------------------------------------
+
+    blocking_issues = (
+        normalized_result.blocking_issues
+    )
+
+    if blocking_issues:
+        messages = "; ".join(
+            issue.message
+            for issue in blocking_issues
+        )
+
+        raise ValueError(
+            "Extraction has blocking issues and cannot "
+            f"be approved: {messages}"
+        )
+
+    # ---------------------------------------------------------
+    # 11. Persist ONLY after every validation check succeeds
     # ---------------------------------------------------------
 
     persist_approved_extraction(
@@ -467,14 +568,29 @@ def approve_extraction_with_session(
         extraction_result=normalized_result,
     )
 
+    # ---------------------------------------------------------
+    # 12. Return without committing
+    # ---------------------------------------------------------
+
     return extraction
 
+
+# ============================================================
+# PUBLIC APPROVAL TRANSACTION
+# ============================================================
 
 def approve_extraction_transaction(
     extraction_id: int,
 ) -> ExtractionHistory:
     """
     Public transaction boundary for approving an extraction.
+
+    IMPORTANT:
+
+    This function is the final approval boundary.
+
+    The extraction remains PENDING until an administrator
+    explicitly clicks the Approve action.
 
     A successful approval commits all changes atomically.
 
@@ -489,14 +605,31 @@ def approve_extraction_transaction(
                 extraction_id=extraction_id,
             )
 
+            # -------------------------------------------------
+            # Commit only after ALL validation and persistence
+            # operations have succeeded.
+            # -------------------------------------------------
+
             session.commit()
 
             session.refresh(extraction)
 
-            queue_new_exam_notifications(extraction.notification_id)
-            
+            # -------------------------------------------------
+            # Notifications are triggered only after the
+            # approval transaction has successfully committed.
+            # -------------------------------------------------
+
+            queue_new_exam_notifications(
+                extraction.notification_id
+            )
+
             return extraction
 
         except Exception:
+            # -------------------------------------------------
+            # Absolutely nothing from this approval operation
+            # should remain in the database after failure.
+            # -------------------------------------------------
+
             session.rollback()
             raise

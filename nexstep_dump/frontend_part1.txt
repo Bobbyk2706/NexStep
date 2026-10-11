@@ -1,0 +1,250 @@
+
+=== FILE: frontend\.oxlintrc.json ===
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "oxc"],
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+  }
+}
+
+
+=== FILE: frontend\index.html ===
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="NexStep — automatically see which exams you're eligible for." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://api.fontshare.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet" />
+    <title>NexStep — Your next eligible exam, found automatically</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+
+=== FILE: frontend\package.json ===
+{
+  "name": "nexstep",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^1.37.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "autoprefixer": "^10.5.4",
+    "oxlint": "^1.79.0",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^3.4.19",
+    "vite": "^8.2.2"
+  }
+}
+
+
+=== FILE: frontend\postcss.config.js ===
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+
+
+=== FILE: frontend\README.md ===
+# NexStep Frontend
+
+React + Vite + Tailwind frontend for NexStep.
+
+The frontend is wired to the FastAPI backend rather than local mock data. Student and admin
+sessions use separate JWT storage, and the admin extraction/review screens call the backend
+AI discovery and human-review endpoints directly.
+
+## Run it
+
+```bash
+npm install
+npm run dev
+```
+
+The Vite development server runs at `http://localhost:5173` by default.
+
+Set `VITE_API_BASE_URL` in `.env` when the backend is not running at the default
+`http://localhost:8000/api`.
+
+```env
+VITE_API_BASE_URL=http://localhost:8000/api
+```
+
+## Build
+
+```bash
+npm run build
+```
+
+## Main frontend areas
+
+```text
+src/
+├── api/                 Student API clients
+├── admin/               Admin app, API clients, pages and review components
+├── components/          Shared UI, layout and assistant components
+├── context/             Authentication, profile and notification state
+├── pages/               Student-facing screens
+├── routes/              Student route guards
+└── utils/               Shared helpers
+```
+
+## Backend integrations
+
+Student:
+
+- `/api/auth/*` — authentication and current user
+- `/api/student/profile` — profile read/write
+- `/api/exams` — approved exams and search
+- `/api/eligibility/*` — eligibility evaluation
+- `/api/notifications/*` — student notifications
+- `/api/assistant/chat` — retrieval-grounded assistant
+
+Admin:
+
+- `/api/auth/admin/login` and `/api/auth/*` — admin authentication
+- `/admin/extractions` — AI discovery and extraction history
+- `/admin/extractions/{id}` — extraction review data
+- `/admin/extractions/{id}/approve` — approve extraction
+- `/admin/extractions/{id}/reject` — reject extraction
+- `/admin/extractions/{id}/retry` — retry rejected extraction
+- `/api/exams` — authoritative approved exam data
+
+The admin discovery pipeline is executed by the backend. The frontend does not simulate
+processing stages or maintain an in-memory extraction database.
+
+
+=== FILE: frontend\tailwind.config.js ===
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        paper: "#F7F3EC",
+        surface: "#FBF9F5",
+        ink: {
+          DEFAULT: "#1A1815",
+          soft: "#57534A",
+          faint: "#746E5E",
+        },
+        // "indigo" now carries the ink/gold primary-action scale — kept under
+        // the old name so every existing bg-indigo-*/text-indigo-*/etc class
+        // repaints automatically. 700 = solid ink (button fills). 500 = the
+        // accessible gold (focus rings, borders). Link/accent TEXT usages
+        // were redirected to text-gold directly (see README).
+        indigo: {
+          50: "#F3EADA",
+          100: "#E4D9C4",
+          200: "#DCCFAE",
+          300: "#B79A63",
+          400: "#9C7A3C",
+          500: "#8A6A34",
+          600: "#2E2B26",
+          700: "#1A1815",
+          900: "#100E0C",
+        },
+        // "signal" = eligible/approved — deep forest instead of emerald.
+        signal: {
+          50: "#E8EDE9",
+          200: "#A9C4B2",
+          500: "#2F4739",
+          600: "#243830",
+        },
+        // "amber" = attention/deadline — a deeper ochre, kept distinct from
+        // both gold (brand accent) and red (rejected/failed).
+        amber: {
+          50: "#F5EDDC",
+          200: "#E3CFA0",
+          300: "#D6B87C",
+          400: "#BE9752",
+          500: "#A6752F",
+          600: "#8A6023",
+          700: "#6E4C1C",
+        },
+        // Admin's rejected/failed red, remapped to a muted rust so nothing
+        // in the app is a stock saturated color.
+        red: {
+          50: "#F3E7E1",
+          100: "#E8D2C7",
+          200: "#D9B8AC",
+          300: "#C79885",
+          500: "#8C4A3A",
+          600: "#733C2F",
+          700: "#5C3025",
+        },
+        gold: {
+          DEFAULT: "#8A6A34",
+          soft: "#B79A63",
+          faint: "#DCCFAE",
+        },
+        slate: {
+          50: "#F1ECE1",
+          100: "#EFE8DA",
+          200: "#DCD3C0",
+          300: "#C4B8A0",
+          400: "#746E5E",
+          500: "#57534A",
+          600: "#453F33",
+          700: "#332E24",
+        },
+      },
+      fontFamily: {
+        display: ["Newsreader", "Georgia", "serif"],
+        body: ["General Sans", "sans-serif"],
+        mono: ["IBM Plex Mono", "monospace"],
+      },
+      borderRadius: {
+        xl: "8px",
+        "2xl": "10px",
+      },
+      boxShadow: {
+        card: "0 1px 2px rgba(26,24,21,0.03)",
+        soft: "0 12px 32px -16px rgba(26,24,21,0.14)",
+      },
+    },
+  },
+  plugins: [],
+}
+
+
+
+=== FILE: frontend\vite.config.js ===
+import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite'
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+})
+

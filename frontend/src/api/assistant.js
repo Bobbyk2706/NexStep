@@ -20,15 +20,15 @@ export async function askAssistant(message, history = []) {
 
     return { kind: "ok", data };
   } catch (err) {
-    if (err instanceof ApiError && err.status >= 500) {
-      return { kind: "backend-unavailable" };
+    if (err instanceof ApiError && err.status === 429) {
+      return { kind: "rate-limited", message: err.message };
     }
     if (err instanceof ApiError) {
-      // 4xx (e.g. auth expired) — surface as backend-unavailable too;
-      // the chat UI has no dedicated "please log in again" state yet.
+      // 5xx, or a 4xx such as an expired login: the chat UI has no
+      // dedicated "log in again" state, so show the unavailable state.
       return { kind: "backend-unavailable" };
     }
-    // fetch() itself threw — no response at all (offline, DNS, CORS).
+    // fetch() itself threw: no response at all (offline, DNS, CORS).
     return { kind: "network-error" };
   }
 }
@@ -40,10 +40,28 @@ export function toChatMessage(thinkingId, result) {
   if (result.kind === "network-error") {
     return { id: thinkingId, role: "assistant", status: "network-error" };
   }
+  if (result.kind === "rate-limited") {
+    return {
+      id: thinkingId,
+      role: "assistant",
+      status: "done",
+      content:
+        result.message ||
+        "You have asked a lot of questions. Please wait a few minutes and try again.",
+      sources: [],
+    };
+  }
 
-  const { answer, sources, grounded } = result.data;
+  const { answer, sources, unavailable } = result.data;
 
-  if (!grounded && (!sources || sources.length === 0)) {
+  // No AI model could be reached on the server.
+  if (unavailable) {
+    return { id: thinkingId, role: "assistant", status: "backend-unavailable" };
+  }
+
+  // Show every real answer, including greetings and "how does NexStep
+  // work" replies that match no specific exam.
+  if (!answer || !answer.trim()) {
     return { id: thinkingId, role: "assistant", status: "no-info" };
   }
 

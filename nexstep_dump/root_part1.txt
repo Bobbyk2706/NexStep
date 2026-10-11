@@ -1,0 +1,403 @@
+
+=== FILE: psql_commands.txt ===
+NEXSTEP - PSQL COMMANDS (view and delete data)
+================================================
+
+WARNING
+-------
+This is the shared Supabase database. Anything you delete disappears from
+the live site immediately and CANNOT be undone. Tell your friend first.
+Table names below come from the models - run \dt first to confirm them.
+Every SQL statement must end with a semicolon (;).
+
+
+------------------------------------------------------------
+PART 0 - CONNECT AND BACK UP   (run in PowerShell, from NexStep folder)
+------------------------------------------------------------
+
+$line = Get-Content .env | Where-Object { $_ -match '^DATABASE_URL=' } | Select-Object -First 1
+$url = ($line -replace '^DATABASE_URL=', '').Trim().Trim('"').Trim("'") -replace '^postgresql\+\w+://', 'postgresql://'
+
+Backup (keep backup.sql OUT of git - it has emails and password hashes):
+
+pg_dump $url -f backup.sql
+
+Open psql:
+
+psql $url
+
+Leave psql with:   \q
+
+$line = Get-Content .env | Where-Object { $_ -match '^DATABASE_URL=' } | Select-Object -First 1
+$url = ($line -replace '^DATABASE_URL=', '').Trim().Trim('"').Trim("'") -replace '^postgresql\+\w+://', 'postgresql://'
+pg_dump $url -f backup.sql
+psql $url
+------------------------------------------------------------
+PART 1 - SEE THE DETAILS   (run inside psql)
+------------------------------------------------------------
+
+List all tables:
+
+\dt
+
+Row count of every main table:
+
+SELECT 'student' AS tbl, count(*) FROM student
+UNION ALL SELECT 'admin', count(*) FROM admin
+UNION ALL SELECT 'exam', count(*) FROM exam
+UNION ALL SELECT 'officialnotification', count(*) FROM officialnotification
+UNION ALL SELECT 'extractionhistory', count(*) FROM extractionhistory
+UNION ALL SELECT 'notification', count(*) FROM notification
+UNION ALL SELECT 'trackedexam', count(*) FROM trackedexam
+UNION ALL SELECT 'pending_signup', count(*) FROM pending_signup;
+
+All students:
+
+SELECT student_id, name, email, account_status, (password_hash IS NOT NULL) AS has_password FROM student ORDER BY student_id;
+
+All admins:
+
+SELECT admin_id, name, email, account_status FROM admin ORDER BY admin_id;
+
+All exams with their conducting body:
+
+SELECT e.exam_id, e.name, e.status, c.name AS body,
+       (SELECT count(*) FROM officialnotification n WHERE n.exam_id = e.exam_id) AS notifications
+FROM exam e LEFT JOIN conducting_body c ON c.body_id = e.body_id ORDER BY e.exam_id;
+
+Official notifications:
+
+SELECT n.notification_id, e.name, n.approval_status, n.application_end_date
+FROM officialnotification n JOIN exam e ON e.exam_id = n.exam_id ORDER BY n.notification_id;
+
+Latest 50 extractions:
+
+SELECT extraction_id, notification_id, extraction_status, created_at FROM extractionhistory ORDER BY extraction_id DESC LIMIT 50;
+
+Notifications sent to students (with email status):
+
+SELECT notification_id, student_id, notification_type, email_status, created_at FROM notification ORDER BY notification_id DESC LIMIT 50;
+
+Columns of a table (example: admin):
+
+\d admin
+
+
+------------------------------------------------------------
+PART 2 - HOW TO DELETE SAFELY (use a transaction)
+------------------------------------------------------------
+
+BEGIN;
+-- ...delete commands...
+-- re-run the count query to check the result
+COMMIT;      -- keep the changes
+-- or
+ROLLBACK;    -- undo everything
+
+If any statement shows an error, you MUST run ROLLBACK; and then fix it.
+
+
+------------------------------------------------------------
+PART 3 - DELETE ALL EXAMS (keeps students and admins)
+------------------------------------------------------------
+
+Removes exams, official notifications, dates, eligibility rules,
+extraction history, student notifications, tracked exams and
+eligibility results.
+
+BEGIN;
+TRUNCATE TABLE exam RESTART IDENTITY CASCADE;
+-- Read the NOTICE lines: they list every table that was cleared.
+-- Check the counts, then COMMIT; or ROLLBACK;
+
+Optional - remove leftover conducting bodies afterwards:
+
+DELETE FROM conducting_body;
+
+
+DELETE ONE EXAM  (change 44 to the exam_id)
+-------------------------------------------
+
+BEGIN;
+DELETE FROM eligibilityrule WHERE group_id IN (SELECT group_id FROM eligibilityrulegroup WHERE notification_id IN (SELECT notification_id FROM officialnotification WHERE exam_id = 44));
+DELETE FROM eligibilityrulegroup WHERE notification_id IN (SELECT notification_id FROM officialnotification WHERE exam_id = 44);
+DELETE FROM examdate WHERE notification_id IN (SELECT notification_id FROM officialnotification WHERE exam_id = 44);
+DELETE FROM extractionhistory WHERE notification_id IN (SELECT notification_id FROM officialnotification WHERE exam_id = 44);
+DELETE FROM notification WHERE exam_id = 44;
+DELETE FROM trackedexam WHERE exam_id = 44;
+DELETE FROM studentexameligibility WHERE exam_id = 44;
+DELETE FROM officialnotification WHERE exam_id = 44;
+DELETE FROM exam WHERE exam_id = 44;
+COMMIT;
+
+If a line fails because another table (for example monitoring reviews)
+references these rows, ROLLBACK; and send me the error.
+
+
+------------------------------------------------------------
+PART 4 - DELETE STUDENTS (profiles and emails)
+------------------------------------------------------------
+
+ALL students, with education, work experience, notifications,
+tracked exams and eligibility results:
+
+BEGIN;
+TRUNCATE TABLE student RESTART IDENTITY CASCADE;
+TRUNCATE TABLE pending_signup RESTART IDENTITY;
+-- check the counts, then COMMIT; or ROLLBACK;
+
+(pending_signup holds emails from signups that were never verified.)
+
+
+DELETE ONE STUDENT  (change 12 to the student_id)
+-------------------------------------------------
+
+BEGIN;
+DELETE FROM notification WHERE student_id = 12;
+DELETE FROM trackedexam WHERE student_id = 12;
+DELETE FROM studentexameligibility WHERE student_id = 12;
+DELETE FROM education WHERE student_id = 12;
+DELETE FROM work_experience WHERE student_id = 12;
+DELETE FROM student WHERE student_id = 12;
+COMMIT;
+
+
+FIND FAKE TEST ACCOUNTS
+-----------------------
+
+SELECT student_id, email FROM student WHERE email LIKE '%@nexstep.com';
+
+Then use those IDs with the "delete one student" block above.
+
+
+------------------------------------------------------------
+PART 5 - ADMINS (be careful)
+------------------------------------------------------------
+
+The app has NO admin signup route. If you delete every admin, nobody
+can log in to the admin panel until you insert one by hand.
+Delete specific admins and keep at least one:
+
+BEGIN;
+DELETE FROM admin WHERE admin_id = 3;
+COMMIT;
+
+Do NOT run TRUNCATE ... CASCADE on the admin table. It would also wipe
+tables that reference admins (audit logs, possibly reviews).
+
+
+CREATE A NEW ADMIN
+------------------
+
+1) Check the columns first (inside psql):
+
+\d admin
+
+2) Make a password hash (PowerShell, from the backend folder):
+
+python -c "from app.auth.security import hash_password; print(hash_password('ChooseAStrongPassword'))"
+
+3) Insert it (inside psql). Add any other NOT NULL columns that
+   \d admin shows:
+
+INSERT INTO admin (name, email, password_hash, account_status)
+VALUES ('Admin', 'you@example.com', '<paste the hash here>', 'active');
+
+
+------------------------------------------------------------
+NEVER DELETE
+------------------------------------------------------------
+
+- alembic_version      (Alembic loses track of the database)
+- eligibilityattribute (lookup table the eligibility rules refer to;
+                        the commands above leave it alone)
+
+=== FILE: pyproject.toml ===
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexstep"
+version = "0.1.0"
+description = "AI-Powered Exam Eligibility and Tracking Platform"
+requires-python = ">=3.11,<3.14"
+
+dependencies = [
+    # Web API
+    "fastapi>=0.141,<1.0",
+    "uvicorn>=0.52,<1.0",
+    # Database
+    "sqlalchemy>=2.0,<3.0",
+    "psycopg2-binary>=2.9,<3.0",
+    # Validation / Configuration
+    "pydantic>=2.13,<3.0",
+    "email-validator>=2.0,<3.0",
+    "python-dotenv>=1.2,<2.0",
+    # HTTP / Web Discovery
+    "requests>=2.32,<3.0",
+    "httpx>=0.27,<1.0",
+    "beautifulsoup4>=4.15,<5.0",
+    "tavily-python>=0.8.4",
+    # PDF Processing
+    "pymupdf>=1.28,<2.0",
+    # Authentication / Security
+    "bcrypt>=4.0,<6.0",
+    "python-jose[cryptography]>=3.5,<4.0",
+    # AI Providers
+    "openai>=1.0,<3.0",
+    "groq>=1.7.0",
+    "ollama>=0.6.2",
+    # Scheduling
+    "apscheduler>=3.11.3",
+    # Testing
+    "pytest>=9.0,<10.0",
+    "alembic>=1.20.0",
+    "psycopg[binary]>=3.3.6",
+]
+
+[tool.setuptools]
+package-dir = {"" = "backend"}
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+
+=== FILE: README.md ===
+# NexStep
+
+### AI-Powered Exam Eligibility and Tracking Platform
+
+NexStep helps students discover examinations they are eligible for, track important deadlines, and receive updates from official examination sources.
+
+It combines **AI, automation, and rule-based eligibility evaluation** to provide personalized examination information in one place.
+
+---
+
+## Features
+
+### Student
+
+- Registration & Login
+- Student Profile
+- Automatic Exam Eligibility Checking
+- Eligible / Non-Eligible Exams
+- Exam Tracking
+- Deadline Reminders
+- In-App & Email Notifications
+- AI Chat Assistant
+
+### Admin
+
+- Manage Examinations
+- Manage Eligibility Rules
+- Review AI-extracted information
+- Approve / Reject updates
+- Audit Logs
+
+### Automation & AI
+
+- Monitor official examination websites
+- Detect new and updated notifications
+- Extract information from official notifications
+- Compare notification versions
+- Summarize important updates
+- Trigger eligibility re-evaluation and notifications
+
+---
+
+## Technology Stack
+
+- **Frontend:** React, JavaScript, HTML, CSS
+- **Backend:** Python, FastAPI
+- **Database:** PostgreSQL
+- **ORM:** SQLAlchemy
+- **AI:** Large Language Models
+- **Automation:** Selenium, BeautifulSoup
+- **Authentication:** JWT
+- **Tools:** Git, GitHub, VS Code
+
+---
+
+## Development Status
+
+**Current Phase:** Architecture & Development
+
+### Completed
+
+- Requirements Analysis
+- SRS
+- SADD
+- System Architecture
+- ER Diagram
+- Database Design
+- Initial PostgreSQL Tables & Relationships
+- Authentication
+
+### Next
+
+- Backend Development
+- Eligibility Engine
+- Frontend Development
+- Automation
+- AI Integration
+- Notifications
+- Testing & Deployment
+
+---
+## Goal
+
+NexStep aims to transform examination discovery from a **manual search process** into a **personalized and automated service**.
+
+> **Instead of searching multiple websites to find opportunities, students can find the examinations they are eligible for in one place.**
+
+---
+
+# Project Structure
+
+```text
+NexStep/
+│
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   │
+│   │   ├── models/
+│   │   ├── schemas/
+│   │   ├── routers/
+│   │   ├── services/
+│   │   ├── database/
+│   │   ├── auth/
+│   │   ├── eligibility/
+│   │   ├── notifications/
+│   │   ├── automation/
+│   │   └── ai/
+│   │
+│   └── requirements.txt
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   ├── services/
+│   │   └── App.jsx
+│   │
+│   └── package.json
+│
+├── database/
+│   ├── schema/
+│   └── migrations/
+│
+├── docs/
+│   ├── SRS/
+│   ├── SADD/
+│   └── diagrams/
+│
+├── tests/
+│   ├── backend/
+│   ├── frontend/
+│   └── integration/
+│
+├── .gitignore
+└── README.md
+

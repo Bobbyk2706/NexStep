@@ -1,0 +1,2157 @@
+
+=== FILE: backend\app\routers\admin_discovery.py ===
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+
+from app.auth.dependencies import get_current_admin
+from app.services.ai_exam_discovery_service import (
+    DiscoveryPersistenceError,
+    ExamDiscoveryError,
+    NoNotificationFoundError,
+    discover_exam,
+)
+
+
+router = APIRouter(
+    prefix="/admin/extractions",
+    tags=["admin-discovery"],
+)
+
+
+class CreateExamExtractionRequest(BaseModel):
+    exam_name: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+
+
+class CreateExamExtractionResponse(BaseModel):
+    id: int
+    extraction_id: int
+    notification_id: int
+    exam_id: int
+    exam_name: str
+    official_url: str
+    pdf_path: str
+    status: str
+    approval_status: str
+
+
+@router.post(
+    "",
+    response_model=CreateExamExtractionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_exam_extraction(
+    payload: CreateExamExtractionRequest,
+    admin=Depends(get_current_admin),
+):
+    """
+    Start the complete AI exam-discovery pipeline.
+
+    The pipeline ends with a PENDING extraction.
+    No information is automatically approved.
+    """
+
+    try:
+        return discover_exam(payload.exam_name)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    # Subclasses of ExamDiscoveryError must be caught BEFORE it.
+    except NoNotificationFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "NO_NOTIFICATION_FOUND",
+                "message": str(exc),
+                "official_url": exc.official_url,
+                "pages_checked": exc.pages_checked,
+            },
+        ) from exc
+
+    except DiscoveryPersistenceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "PERSISTENCE_FAILED",
+                "message": str(exc),
+            },
+        ) from exc
+
+    except ExamDiscoveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Exam discovery failed unexpectedly.",
+        ) from exc
+
+=== FILE: backend\app\routers\admin_monitoring.py ===
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+)
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from sqlalchemy import select
+
+from app.auth.dependencies import (
+    get_current_admin,
+)
+from app.database.session import SessionLocal
+from app.models.admin import Admin
+from app.models.exam import Exam
+from app.models.monitoring_review import (
+    MonitoringReview,
+)
+from app.models.official_notification import (
+    OfficialNotification,
+)
+from app.scheduler.monitoring_scheduler import (
+    run_monitoring_cycle_now,
+)
+from app.services.monitoring_review_service import (
+    MonitoringReviewError,
+    apply_approved_monitoring_review,
+    approve_monitoring_review,
+    get_monitoring_review,
+    reject_monitoring_review,
+)
+
+import logging
+
+from app.services.eligibility_re_evaluation_service import (
+    re_evaluate_after_review,
+)
+
+
+router = APIRouter(
+    prefix="/admin/monitoring",
+    tags=["Admin Monitoring"],
+)
+
+
+# ============================================================
+# REQUEST MODELS
+# ============================================================
+
+class MonitoringRejectionRequest(BaseModel):
+    reason: str
+
+
+# ============================================================
+# RUN MONITORING
+# ============================================================
+
+@router.post("/run")
+def run_monitoring(
+    current_admin: Admin = Depends(
+        get_current_admin
+    ),
+):
+    """
+    Run one complete monitoring cycle.
+
+    Only authenticated admins may trigger monitoring.
+    """
+
+    try:
+        result = run_monitoring_cycle_now()
+
+        return {
+            "success": True,
+            "message": (
+                "Monitoring cycle completed."
+            ),
+            "result": result,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=(
+                "Monitoring cycle failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# LIST MONITORING REVIEWS
+# ============================================================
+
+@router.get("/reviews")
+def list_monitoring_reviews(
+    status_filter: str | None = None,
+    current_admin: Admin = Depends(
+        get_current_admin
+    ),
+):
+    """
+    List monitoring reviews without returning the huge
+    extraction payloads.
+
+    Optional:
+
+        /reviews?status_filter=PENDING
+        /reviews?status_filter=APPROVED
+        /reviews?status_filter=REJECTED
+    """
+
+    db = SessionLocal()
+
+    try:
+        query = (
+            db.query(
+                MonitoringReview,
+                OfficialNotification,
+                Exam,
+            )
+            .join(
+                OfficialNotification,
+                MonitoringReview.notification_id
+                == OfficialNotification.notification_id,
+            )
+            .join(
+                Exam,
+                OfficialNotification.exam_id
+                == Exam.exam_id,
+            )
+        )
+
+        if status_filter:
+            query = query.filter(
+                MonitoringReview.review_status
+                == status_filter
+            )
+
+        rows = (
+            query
+            .order_by(
+                MonitoringReview.created_at.desc()
+            )
+            .all()
+        )
+
+        response = []
+
+        for review, notification, exam in rows:
+
+            change_count = None
+
+            try:
+                structural = json.loads(
+                    review.structural_changes
+                )
+
+                if isinstance(
+                    structural,
+                    dict,
+                ):
+                    changes = structural.get(
+                        "changes"
+                    )
+
+                    if isinstance(
+                        changes,
+                        list,
+                    ):
+                        change_count = len(
+                            changes
+                        )
+
+            except Exception:
+                change_count = None
+
+            semantic_summary = None
+
+            try:
+                semantic = json.loads(
+                    review.semantic_analysis
+                )
+
+                if isinstance(
+                    semantic,
+                    dict,
+                ):
+                    semantic_summary = semantic.get(
+                        "overall_summary"
+                    )
+
+            except Exception:
+                semantic_summary = None
+
+            impact_summary = None
+            requires_eligibility = None
+            requires_human_review = None
+
+            try:
+                impact = json.loads(
+                    review.impact_analysis
+                )
+
+                if isinstance(
+                    impact,
+                    dict,
+                ):
+                    impact_summary = impact.get(
+                        "overall_summary"
+                    )
+
+                    requires_eligibility = impact.get(
+                        "overall_requires_eligibility_re_evaluation"
+                    )
+
+                    requires_human_review = impact.get(
+                        "overall_requires_human_review"
+                    )
+
+            except Exception:
+                pass
+
+            response.append(
+                {
+                    "review_id": review.review_id,
+                    "notification_id": (
+                        review.notification_id
+                    ),
+                    "exam_id": exam.exam_id,
+                    "exam_name": exam.name,
+                    "notification_title": (
+                        notification.title
+                    ),
+                    "review_status": (
+                        review.review_status
+                    ),
+                    "old_document_hash": (
+                        review.old_document_hash
+                    ),
+                    "new_document_hash": (
+                        review.new_document_hash
+                    ),
+                    "change_count": change_count,
+                    "semantic_summary": (
+                        semantic_summary
+                    ),
+                    "impact_summary": (
+                        impact_summary
+                    ),
+                    "requires_human_review": (
+                        requires_human_review
+                    ),
+                    "requires_eligibility_re_evaluation": (
+                        requires_eligibility
+                    ),
+                    "created_at": (
+                        review.created_at
+                    ),
+                    "reviewed_at": (
+                        review.reviewed_at
+                    ),
+                    "rejection_reason": (
+                        review.rejection_reason
+                    ),
+                }
+            )
+
+        return response
+
+    finally:
+        db.close()
+
+
+# ============================================================
+# GET ONE MONITORING REVIEW
+# ============================================================
+
+@router.get("/reviews/{review_id}")
+def get_monitoring_review_detail(
+    review_id: int,
+    current_admin: Admin = Depends(
+        get_current_admin
+    ),
+):
+    """
+    Return the complete monitoring review.
+
+    This endpoint contains the detailed structural,
+    semantic and impact analysis.
+    """
+
+    db = SessionLocal()
+
+    try:
+        review = db.scalar(
+            select(MonitoringReview)
+            .where(
+                MonitoringReview.review_id
+                == review_id
+            )
+        )
+
+        if review is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Monitoring review not found."
+                ),
+            )
+
+        notification = db.get(
+            OfficialNotification,
+            review.notification_id,
+        )
+
+        if notification is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Official notification not found."
+                ),
+            )
+
+        exam = db.get(
+            Exam,
+            notification.exam_id,
+        )
+
+        if exam is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Exam not found.",
+            )
+
+        def parse_json(value):
+            try:
+                return json.loads(value)
+            except Exception:
+                return value
+
+        return {
+            "review_id": review.review_id,
+            "review_status": (
+                review.review_status
+            ),
+            "notification_id": (
+                review.notification_id
+            ),
+            "exam_id": exam.exam_id,
+            "exam_name": exam.name,
+            "notification_title": (
+                notification.title
+            ),
+            "official_url": (
+                notification.official_url
+            ),
+            "document_url": (
+                notification.document_url
+            ),
+            "old_document_hash": (
+                review.old_document_hash
+            ),
+            "new_document_hash": (
+                review.new_document_hash
+            ),
+            "old_extraction": parse_json(
+                review.old_extraction
+            ),
+            "new_extraction": parse_json(
+                review.new_extraction
+            ),
+            "structural_changes": parse_json(
+                review.structural_changes
+            ),
+            "semantic_analysis": parse_json(
+                review.semantic_analysis
+            ),
+            "impact_analysis": parse_json(
+                review.impact_analysis
+            ),
+            "reviewed_by": (
+                review.reviewed_by
+            ),
+            "reviewed_at": (
+                review.reviewed_at
+            ),
+            "created_at": (
+                review.created_at
+            ),
+            "rejection_reason": (
+                review.rejection_reason
+            ),
+        }
+
+    finally:
+        db.close()
+
+
+# ============================================================
+# APPROVE
+# ============================================================
+
+@router.post(
+    "/reviews/{review_id}/approve"
+)
+def approve_review(
+    review_id: int,
+    current_admin: Admin = Depends(
+        get_current_admin
+    ),
+):
+    """
+    Record the administrator's approval.
+
+    This does not publish the change yet.
+    """
+
+    try:
+        approved_id = (
+            approve_monitoring_review(
+                review_id=review_id,
+                admin_id=current_admin.admin_id,
+            )
+        )
+
+        return {
+            "success": True,
+            "review_id": approved_id,
+            "status": "APPROVED",
+            "message": (
+                "Monitoring review approved. "
+                "The change can now be published."
+            ),
+        }
+
+    except MonitoringReviewError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================
+# REJECT
+# ============================================================
+
+@router.post(
+    "/reviews/{review_id}/reject"
+)
+def reject_review(
+    review_id: int,
+    request: MonitoringRejectionRequest,
+    current_admin: Admin = Depends(
+        get_current_admin
+    ),
+):
+    """
+    Reject a monitoring change.
+    """
+
+    reason = request.reason.strip()
+
+    if not reason:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Rejection reason is required."
+            ),
+        )
+
+    try:
+        rejected_id = (
+            reject_monitoring_review(
+                review_id=review_id,
+                admin_id=current_admin.admin_id,
+                rejection_reason=reason,
+            )
+        )
+
+        return {
+            "success": True,
+            "review_id": rejected_id,
+            "status": "REJECTED",
+            "message": (
+                "Monitoring review rejected."
+            ),
+        }
+
+    except MonitoringReviewError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================
+# APPLY APPROVED REVIEW
+# ============================================================
+
+@router.post(
+    "/reviews/{review_id}/apply"
+)
+def apply_review(
+    review_id: int,
+    current_admin: Admin = Depends(
+        get_current_admin
+    ),
+):
+    """
+    Publish an already-approved monitoring change into
+    the authoritative exam data.
+    """
+
+    try:
+        applied_id = (
+            apply_approved_monitoring_review(
+                review_id=review_id
+            )
+        )
+
+        # Publishing is already committed. A failure here must not
+        # turn a successful publish into an error response.
+        try:
+            re_evaluate_after_review(applied_id)
+        except Exception:
+            logging.getLogger("app.notifications").exception(
+                "Eligibility re-check failed after applying review %s",
+                applied_id,
+            )
+
+        return {
+            "success": True,
+            "review_id": applied_id,
+            "status": "APPLIED",
+            "message": (
+                "Approved monitoring change "
+                "published successfully."
+            ),
+        }
+
+    except MonitoringReviewError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================
+# NEW MONITORED PDF
+# ============================================================
+
+@router.get(
+    "/reviews/{review_id}/document/new"
+)
+def get_new_monitoring_document(
+    review_id: int,
+    current_admin: Admin = Depends(
+        get_current_admin
+    ),
+):
+    """
+    Serve the newly detected monitoring PDF.
+    """
+
+    db = SessionLocal()
+
+    try:
+        review = db.get(
+            MonitoringReview,
+            review_id,
+        )
+
+        if review is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Monitoring review not found."
+                ),
+            )
+
+        storage_dir = (
+            Path(__file__).resolve().parents[2]
+            / "storage"
+            / "monitoring"
+        )
+
+        pdf_path = (
+            storage_dir
+            / f"{review.new_document_hash}.pdf"
+        )
+
+        if not pdf_path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Monitored PDF was not found."
+                ),
+            )
+
+        return FileResponse(
+            path=str(pdf_path),
+            media_type="application/pdf",
+            filename=(
+                f"monitoring-{review.review_id}.pdf"
+            ),
+        )
+
+    finally:
+        db.close()
+
+=== FILE: backend\app\routers\admin_notifications.py ===
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from app.auth.dependencies import get_current_admin
+from app.services.notification_services import (
+    list_notification_log,
+    notification_summary,
+    resend_email,
+    send_deadline_reminders,
+)
+
+router = APIRouter(
+    prefix="/admin/notifications",
+    tags=["admin-notifications"],
+)
+
+_EMAIL_STATUSES = {"PENDING", "SENT", "FAILED", "SKIPPED"}
+
+
+@router.get("")
+def get_notification_log(
+    email_status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    admin=Depends(get_current_admin),
+):
+    """Notifications sent to students, newest first."""
+
+    if email_status is not None:
+        email_status = email_status.upper()
+
+        if email_status not in _EMAIL_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="email_status must be PENDING, SENT, FAILED or SKIPPED.",
+            )
+
+    return list_notification_log(
+        email_status=email_status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/summary")
+def get_summary(admin=Depends(get_current_admin)):
+    return notification_summary()
+
+
+@router.post("/{notification_id}/retry-email")
+def retry_email(
+    notification_id: int,
+    admin=Depends(get_current_admin),
+):
+    try:
+        new_status = resend_email(notification_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        "notification_id": notification_id,
+        "email_status": new_status,
+    }
+
+
+@router.post("/run-deadline-reminders")
+def run_deadline_reminders(admin=Depends(get_current_admin)):
+    """Run the deadline-reminder job now (it also runs daily)."""
+
+    return send_deadline_reminders()
+
+=== FILE: backend\app\routers\admin_review.py ===
+from __future__ import annotations
+
+import logging
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+)
+from pydantic import BaseModel
+
+from app.ai.review import (
+    approve_extraction,
+    reject_extraction,
+    retry_extraction,
+)
+from app.auth.dependencies import get_current_admin
+from app.database.session import SessionLocal
+from app.models.admin import Admin
+from app.models.exam import Exam
+from app.models.extraction_history import ExtractionHistory
+from app.models.official_notification import OfficialNotification
+
+
+logger = logging.getLogger(__name__)
+
+
+router = APIRouter(
+    prefix="/admin/extractions",
+    tags=["Admin Review"],
+)
+
+
+class RejectionRequest(BaseModel):
+    feedback: str
+
+
+# ---------------------------------------------------------------------------
+# List extractions
+# ---------------------------------------------------------------------------
+
+@router.get("")
+def list_extractions(
+    status_filter: str | None = None,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Return extraction history for the admin dashboard/review list.
+
+    Optional filtering:
+        GET /admin/extractions?status_filter=PENDING
+        GET /admin/extractions?status_filter=APPROVED
+        GET /admin/extractions?status_filter=REJECTED
+    """
+
+    db = SessionLocal()
+
+    try:
+        query = (
+            db.query(
+                ExtractionHistory,
+                OfficialNotification,
+                Exam,
+            )
+            .join(
+                OfficialNotification,
+                ExtractionHistory.notification_id
+                == OfficialNotification.notification_id,
+            )
+            .join(
+                Exam,
+                OfficialNotification.exam_id
+                == Exam.exam_id,
+            )
+        )
+
+        if status_filter:
+            query = query.filter(
+                ExtractionHistory.extraction_status
+                == status_filter
+            )
+
+        rows = (
+            query
+            .order_by(
+                ExtractionHistory.created_at.desc()
+            )
+            .all()
+        )
+
+        return [
+            {
+                "extraction_id": extraction.extraction_id,
+                "notification_id": extraction.notification_id,
+                "exam_id": exam.exam_id,
+                "exam_name": exam.name,
+                "notification_title": notification.title,
+                "extraction_type": extraction.extraction_type,
+                "status": extraction.extraction_status,
+                "change_detected": extraction.change_detected,
+                "change_details": extraction.change_details,
+                "created_at": extraction.created_at,
+            }
+            for extraction, notification, exam in rows
+        ]
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Get extraction for review
+# ---------------------------------------------------------------------------
+
+@router.get("/{extraction_id}")
+def get_extraction_for_review(
+    extraction_id: int,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    db = SessionLocal()
+
+    try:
+        extraction = db.get(
+            ExtractionHistory,
+            extraction_id,
+        )
+
+        if extraction is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Extraction not found.",
+            )
+
+        notification = db.get(
+            OfficialNotification,
+            extraction.notification_id,
+        )
+
+        if notification is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Official notification not found.",
+            )
+
+        return {
+            "extraction_id": extraction.extraction_id,
+            "status": extraction.extraction_status,
+            "notification_id": extraction.notification_id,
+            "original_document": notification.pdf_path,
+            "official_url": notification.official_url,
+            "extracted_content": extraction.extracted_content,
+            "ai_summary": extraction.ai_summary,
+            "change_detected": extraction.change_detected,
+            "change_details": extraction.change_details,
+            "created_at": extraction.created_at,
+        }
+
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Approve
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{extraction_id}/approve",
+    status_code=status.HTTP_200_OK,
+)
+def approve_extraction_review(
+    extraction_id: int,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Approve an extraction through the HITL review workflow.
+
+    The underlying approval service is responsible for:
+
+    - pending-status validation
+    - latest-extraction protection
+    - deserialization
+    - normalization
+    - validation
+    - exam-date persistence
+    - recursive eligibility persistence
+    - atomic transaction commit
+    """
+
+    try:
+        extraction = approve_extraction(
+            extraction_id,
+        )
+
+    except ValueError as error:
+        message = str(error)
+
+        if "no longer the latest" in message.lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from error
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=message,
+        ) from error
+
+    except Exception as error:
+        logger.exception(
+            "Failed to approve extraction_id=%s",
+            extraction_id,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to approve extraction.",
+        ) from error
+
+    return {
+        "message": "Extraction approved successfully.",
+        "extraction_id": extraction.extraction_id,
+        "status": extraction.extraction_status,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Reject
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{extraction_id}/reject",
+    status_code=status.HTTP_200_OK,
+)
+def reject_extraction_review(
+    extraction_id: int,
+    request: RejectionRequest,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Reject an extraction with admin feedback.
+    """
+
+    feedback = request.feedback.strip()
+
+    if not feedback:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rejection feedback cannot be empty.",
+        )
+
+    try:
+        extraction = reject_extraction(
+            extraction_id,
+            feedback,
+        )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reject extraction.",
+        ) from error
+
+    return {
+        "message": "Extraction rejected successfully.",
+        "extraction_id": extraction.extraction_id,
+        "status": extraction.extraction_status,
+        "feedback": feedback,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Retry
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{extraction_id}/retry",
+    status_code=status.HTTP_200_OK,
+)
+def retry_extraction_review(
+    extraction_id: int,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Retry extraction using the existing review workflow.
+    """
+
+    try:
+        extraction = retry_extraction(
+            extraction_id,
+        )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retry extraction.",
+        ) from error
+
+    return {
+        "message": "Extraction retry completed.",
+        "extraction_id": extraction.extraction_id,
+        "status": extraction.extraction_status,
+        "extraction_type": extraction.extraction_type,
+    }
+
+=== FILE: backend\app\routers\auth_router.py ===
+from typing import Union
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from jose import JWTError
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.database.session import get_db
+from app.models.student import Student
+from app.models.admin import Admin
+from app.auth.dependencies import (
+    get_current_principal,
+    get_current_student,
+    get_current_admin,
+    is_account_blocked,
+)
+from app.auth.security import (
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    new_token_version,
+    decode_token,
+)
+from app.schemas.auth import (
+    LoginRequest,
+    RefreshRequest,
+    TokenPair,
+    StudentOut,
+    AdminOut,
+    AuthResponse,
+    UserSummary,
+)
+from app.routers.profile_router import student_has_profile
+
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+# ---------------------------------------------------------------- signup ---
+#
+# Student signup is email-verified and lives in
+# app/routers/signup_verification_router.py (/auth/register/start,
+# /auth/register/verify, /auth/register/resend). The old unverified
+# /auth/signup and /auth/student/signup routes were removed on purpose, so
+# an account can't be created without confirming its email first.
+#
+# NOTE: no admin self-signup route — admin accounts are provisioned
+# directly (e.g. by another admin or a DB seed script), not via a public
+# endpoint.
+
+
+# ------------------------------------------------ unified (frontend) ---
+
+@router.post("/login", response_model=AuthResponse)
+def unified_login(payload: LoginRequest, db: Session = Depends(get_db)):
+    student = (
+        db.query(Student)
+        .filter(func.lower(Student.email) == payload.email.lower())
+        .first()
+    )
+    if not student or not verify_password(payload.password, student.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    if is_account_blocked(student.account_status):
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    if not student.token_version:
+        student.token_version = new_token_version()
+        db.commit()
+
+    access = create_access_token(student.student_id, "student")
+    return AuthResponse(
+        token=access,
+        user=UserSummary(name=student.name, email=student.email),
+        hasProfile=student_has_profile(db, student.student_id),
+    )
+
+
+# ----------------------------------------------------------------- login ---
+
+@router.post("/student/login", response_model=TokenPair)
+def student_login(payload: LoginRequest, db: Session = Depends(get_db)):
+    student = (
+        db.query(Student)
+        .filter(func.lower(Student.email) == payload.email.lower())
+        .first()
+    )
+    if not student or not verify_password(payload.password, student.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    if is_account_blocked(student.account_status):
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    if not student.token_version:
+        student.token_version = new_token_version()
+        db.commit()
+
+    access = create_access_token(student.student_id, "student")
+    refresh = create_refresh_token(student.student_id, "student", student.token_version)
+    return TokenPair(access_token=access, refresh_token=refresh)
+
+
+@router.post("/admin/login", response_model=TokenPair)
+def admin_login(payload: LoginRequest, db: Session = Depends(get_db)):
+    admin = db.query(Admin).filter(Admin.email == payload.email).first()
+    if not admin or not verify_password(payload.password, admin.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    if is_account_blocked(admin.account_status):
+        raise HTTPException(status_code=403, detail="Account is disabled")
+
+    if not admin.token_version:
+        admin.token_version = new_token_version()
+        db.commit()
+
+    access = create_access_token(admin.admin_id, "admin")
+    refresh = create_refresh_token(admin.admin_id, "admin", admin.token_version)
+    return TokenPair(access_token=access, refresh_token=refresh)
+
+
+# --------------------------------------------------------- refresh/logout ---
+
+@router.post("/refresh", response_model=TokenPair)
+def refresh_token(payload: RefreshRequest, db: Session = Depends(get_db)):
+    invalid = HTTPException(status_code=401, detail="Invalid or expired refresh token")
+    try:
+        claims = decode_token(payload.refresh_token)
+    except JWTError:
+        raise invalid
+
+    if claims.get("type") != "refresh":
+        raise invalid
+
+    role = claims.get("role")
+    principal_id = claims.get("sub")
+    if role not in ("student", "admin") or principal_id is None:
+        raise invalid
+
+    model = Student if role == "student" else Admin
+    pk_column = Student.student_id if role == "student" else Admin.admin_id
+    principal = db.query(model).filter(pk_column == int(principal_id)).first()
+
+    if principal is None or is_account_blocked(principal.account_status):
+        raise invalid
+    # Reject refresh tokens issued before the last logout/rotation.
+    if claims.get("trv") != principal.token_version:
+        raise invalid
+
+    # Rotate: issue a brand new refresh token and invalidate this one by
+    # bumping token_version, so a stolen refresh token can't be reused
+    # after the legitimate client rotates.
+    principal.token_version = new_token_version()
+    db.commit()
+
+    access = create_access_token(int(principal_id), role)
+    new_refresh = create_refresh_token(int(principal_id), role, principal.token_version)
+    return TokenPair(access_token=access, refresh_token=new_refresh)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    principal: tuple[str, Student | Admin] = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    """Invalidates all outstanding refresh tokens for the current student/admin."""
+    _, obj = principal
+    obj.token_version = new_token_version()
+    db.commit()
+
+
+# -------------------------------------------------------------------- me ---
+
+@router.get("/me", response_model=Union[StudentOut, AdminOut])
+def read_me(principal: tuple[str, Student | Admin] = Depends(get_current_principal)):
+    _, obj = principal
+    return obj
+
+
+@router.get("/admin/ping", response_model=AdminOut)
+def admin_only_example(current_admin: Admin = Depends(get_current_admin)):
+    """Example of a role-gated route — reuse Depends(get_current_admin) like this."""
+    return current_admin
+
+
+@router.get("/student/ping", response_model=StudentOut)
+def student_only_example(current_student: Student = Depends(get_current_student)):
+    """Example of a role-gated route — reuse Depends(get_current_student) like this."""
+    return current_student
+
+=== FILE: backend\app\routers\chatbot_router.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.auth.dependencies import get_current_student
+from app.database.session import get_db
+from app.models.student import Student
+from app.schemas.chatbot import ChatRequest, ChatResponse
+from app.services.chatbot_service import answer_question
+
+router = APIRouter(prefix="/assistant", tags=["assistant"])
+
+
+@router.post("/chat", response_model=ChatResponse)
+def chat(
+    payload: ChatRequest,
+    current_student: Student = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    """
+    Answer a logged-in student's question about exam eligibility,
+    deadlines, or notifications.
+
+    The answer is grounded in NexStep's own exam/eligibility data
+    (see app.services.chatbot_service) rather than the model's own
+    training-data knowledge of specific exams, so it stays correct
+    even as NexStep's own notification data changes.
+    """
+
+    try:
+        result = answer_question(
+            db=db,
+            message=payload.message,
+            student=current_student,
+            history=[turn.model_dump() for turn in payload.history],
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Assistant could not produce an answer: {error}",
+        ) from error
+
+    return ChatResponse(
+        answer=result.answer,
+        sources=[
+            {
+                "exam_id": s.exam_id,
+                "exam_name": s.exam_name,
+                "notification_title": s.notification_title,
+                "official_url": s.official_url,
+            }
+            for s in result.sources
+        ],
+        grounded=result.grounded,
+    )
+
+
+=== FILE: backend\app\routers\eligibility_router.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from app.auth.dependencies import get_current_student, get_current_admin
+from app.models.student import Student
+from app.models.admin import Admin
+from app.services.student_exam_eligibility_service import (
+    create_eligibility,
+    get_eligibility,
+)
+from app.schemas.eligibility import EligibilityOut
+
+router = APIRouter(prefix="/eligibility", tags=["eligibility"])
+
+
+def _to_out(record) -> EligibilityOut:
+    return EligibilityOut.model_validate(record)
+
+
+def _raise_for_value_error(exc: ValueError):
+    """Existing services raise plain ValueError for everything — map the
+    message to a sensible HTTP status rather than always returning 500."""
+    message = str(exc)
+    not_found_markers = ("not found", "No official notifications found")
+    if any(marker in message for marker in not_found_markers):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=message)
+    # Anything else (unsupported attribute, missing current education, etc.)
+    # means the rule config or the student's profile can't be evaluated as-is.
+    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=message)
+
+
+# ------------------------------------------------------------- student ---
+
+@router.post(
+    "/{exam_id}/evaluate",
+    response_model=EligibilityOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def evaluate_my_eligibility(
+    exam_id: int,
+    current_student: Student = Depends(get_current_student),
+):
+    """Evaluates and stores a fresh eligibility result for the current
+    student against the given exam's latest official notification."""
+    try:
+        create_eligibility(current_student.student_id, exam_id)
+    except ValueError as exc:
+        _raise_for_value_error(exc)
+
+    record = get_eligibility(current_student.student_id, exam_id)
+    return _to_out(record)
+
+
+@router.get("/{exam_id}", response_model=EligibilityOut)
+def get_my_eligibility(
+    exam_id: int,
+    current_student: Student = Depends(get_current_student),
+):
+    """Returns the most recently stored eligibility result — does not
+    evaluate on the fly. Call POST /eligibility/{exam_id}/evaluate first
+    if no result exists yet, or to refresh a stale one."""
+    record = get_eligibility(current_student.student_id, exam_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No eligibility record yet — "
+            "POST /eligibility/{exam_id}/evaluate first",
+        )
+    return _to_out(record)
+
+
+# --------------------------------------------------------------- admin ---
+
+@router.post(
+    "/admin/{student_id}/{exam_id}/evaluate",
+    response_model=EligibilityOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def evaluate_student_eligibility(
+    student_id: int,
+    exam_id: int,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    try:
+        create_eligibility(student_id, exam_id)
+    except ValueError as exc:
+        _raise_for_value_error(exc)
+
+    record = get_eligibility(student_id, exam_id)
+    return _to_out(record)
+
+
+@router.get("/admin/{student_id}/{exam_id}", response_model=EligibilityOut)
+def get_student_eligibility(
+    student_id: int,
+    exam_id: int,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    record = get_eligibility(student_id, exam_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No eligibility record found",
+        )
+    return _to_out(record)
+
+=== FILE: backend\app\routers\exam_router.py ===
+from fastapi import APIRouter, HTTPException, Query, status
+
+from app.schemas.exam import (
+    ExamDetailOut,
+    ExamListOut,
+)
+from app.services.exam_service import (
+    get_all_exams,
+    get_exam_by_id,
+    search_exams,
+)
+from app.services.official_notification_service import (
+    get_latest_approved_notification,
+)
+
+
+router = APIRouter(
+    prefix="/exams",
+    tags=["exams"],
+)
+
+
+def _exam_to_list_response(exam) -> dict:
+    """
+    Converts an Exam SQLAlchemy object into the structure
+    expected by ExamListOut.
+    """
+    return {
+        "exam_id": exam.exam_id,
+        "name": exam.name,
+        "type": exam.type,
+        "description": exam.description,
+        "off_exam_page": exam.off_exam_page,
+        "status": exam.status,
+        "conducting_body": exam.body,
+    }
+
+
+@router.get(
+    "",
+    response_model=list[ExamListOut],
+)
+def list_exams():
+    """
+    Returns all exams available in the database.
+    """
+    exams = get_all_exams()
+
+    return [
+        _exam_to_list_response(exam)
+        for exam in exams
+    ]
+
+
+@router.get(
+    "/search",
+    response_model=list[ExamListOut],
+)
+def search_exam_list(
+    q: str = Query(
+        ...,
+        min_length=1,
+        description="Search by exam name or description",
+    ),
+):
+    """
+    Searches exams by name or description.
+    """
+    exams = search_exams(q)
+
+    return [
+        _exam_to_list_response(exam)
+        for exam in exams
+    ]
+
+
+@router.get(
+    "/{exam_id}",
+    response_model=ExamDetailOut,
+)
+def get_exam(exam_id: int):
+    """
+    Returns detailed information about one exam, including
+    its latest approved official notification.
+    """
+    exam = get_exam_by_id(exam_id)
+
+    if exam is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Exam not found",
+        )
+
+    notification = get_latest_approved_notification(exam_id)
+
+    if notification is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Exam is not available until an official notification is approved.",
+        )
+
+    return {
+        "exam_id": exam.exam_id,
+        "name": exam.name,
+        "type": exam.type,
+        "description": exam.description,
+        "off_exam_page": exam.off_exam_page,
+        "status": exam.status,
+        "conducting_body": exam.body,
+        "latest_approved_notification": notification,
+    }
+
+=== FILE: backend\app\routers\notification_router.py ===
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.auth.dependencies import get_current_student
+from app.database.session import get_db
+from app.models.notification import Notification
+from app.models.student import Student
+
+router = APIRouter(prefix="/notifications", tags=["notifications"])
+
+
+def _to_out(notification: Notification) -> dict:
+    return {
+        "notification_id": notification.notification_id,
+        "student_id": notification.student_id,
+        "exam_id": notification.exam_id,
+        "notification_type": notification.notification_type,
+        "title": notification.title,
+        "message": notification.message,
+        "is_read": notification.is_read,
+        "created_at": notification.created_at,
+        "read_at": notification.read_at,
+    }
+
+
+@router.get("")
+def get_my_notifications(
+    current_student: Student = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    notifications = db.scalars(
+        select(Notification)
+        .where(Notification.student_id == current_student.student_id)
+        .order_by(Notification.created_at.desc(), Notification.notification_id.desc())
+    ).all()
+
+    return [_to_out(notification) for notification in notifications]
+
+
+@router.post("/{notification_id}/read")
+def mark_my_notification_as_read(
+    notification_id: int,
+    current_student: Student = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    notification = db.scalar(
+        select(Notification).where(
+            Notification.notification_id == notification_id,
+            Notification.student_id == current_student.student_id,
+        )
+    )
+
+    if notification is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification not found.",
+        )
+
+    notification.is_read = True
+    notification.read_at = datetime.now()
+    db.commit()
+
+    return _to_out(notification)
+
+
+@router.post("/read-all")
+def mark_all_my_notifications_as_read(
+    current_student: Student = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    notifications = db.scalars(
+        select(Notification).where(
+            Notification.student_id == current_student.student_id,
+            Notification.is_read.is_(False),
+        )
+    ).all()
+
+    now = datetime.now()
+    for notification in notifications:
+        notification.is_read = True
+        notification.read_at = now
+
+    db.commit()
+
+    return [_to_out(notification) for notification in notifications]
+
+
+=== FILE: backend\app\routers\profile_router.py ===
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.database.session import get_db
+from app.auth.dependencies import get_current_student
+from app.models.student import Student
+from app.models.education import Education
+from app.models.work_experience import WorkExperience
+from app.schemas.profile import (
+    ProfileIn,
+    ProfileOut,
+    QualificationEntry,
+    WorkExperienceEntry,
+)
+
+router = APIRouter(prefix="/student", tags=["profile"])
+
+_YEAR_LABEL_TO_INT = {
+    "1st Year": 1,
+    "2nd Year": 2,
+    "3rd Year": 3,
+    "4th Year": 4,
+}
+
+
+def _clean(value: str | None) -> str | None:
+    """Trim a string; blank becomes None."""
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _parse_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _parse_float(value: str | None) -> float | None:
+    if not value:
+        return None
+
+    cleaned = value.strip().replace("%", "")
+    if not cleaned:
+        return None
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_score(value: str | None) -> tuple[float | None, float | None]:
+    """Returns (cgpa, percentage) - the frontend's per-qualification
+    'score' field is a single free-text box covering either."""
+    if not value:
+        return None, None
+    cleaned = value.strip()
+    if "%" in cleaned:
+        try:
+            return None, float(cleaned.replace("%", "").strip())
+        except ValueError:
+            return None, None
+    try:
+        return float(cleaned), None
+    except ValueError:
+        return None, None
+
+
+def _fmt_num(value: float) -> str:
+    """Drop a trailing .0 so a score like 92% doesn't come back as 92.0%."""
+    return str(int(value)) if value == int(value) else str(value)
+
+
+def _entry_to_out(edu: Education) -> QualificationEntry:
+    if edu.percentage is not None:
+        score_str = f"{_fmt_num(edu.percentage)}%"
+    elif edu.cgpa is not None:
+        score_str = _fmt_num(edu.cgpa)
+    else:
+        score_str = None
+    return QualificationEntry(
+        level=edu.qualification,
+        institution=edu.institution,
+        field=edu.specialization,
+        yearCompleted=str(edu.year_of_passing) if edu.year_of_passing else None,
+        score=score_str,
+    )
+
+
+def student_has_profile(db: Session, student_id: int) -> bool:
+    """
+    A profile exists once the required personal details (date of birth)
+    are saved. Academic details are optional, so they no longer decide this.
+    Students with education rows from before this change still count.
+    """
+    student = db.get(Student, student_id)
+
+    if student is not None and student.date_of_birth is not None:
+        return True
+
+    return (
+        db.query(Education)
+        .filter(Education.student_id == student_id)
+        .first()
+        is not None
+    )
+
+
+@router.get("/profile", response_model=ProfileOut | None)
+def get_profile(
+    current_student: Student = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    current = (
+        db.query(Education)
+        .filter(Education.student_id == current_student.student_id, Education.is_current.is_(True))
+        .first()
+    )
+
+    if current is None and current_student.date_of_birth is None:
+        # Profile not started yet.
+        return None
+
+    past_quals = (
+        db.query(Education)
+        .filter(
+            Education.student_id == current_student.student_id,
+            Education.is_current.isnot(True),
+            Education.is_higher_qualification.isnot(True),
+        )
+        .all()
+    )
+    higher_qual = (
+        db.query(Education)
+        .filter(
+            Education.student_id == current_student.student_id,
+            Education.is_higher_qualification.is_(True),
+        )
+        .first()
+    )
+    work_rows = (
+        db.query(WorkExperience)
+        .filter(WorkExperience.student_id == current_student.student_id)
+        .all()
+    )
+
+    return ProfileOut(
+        name=current_student.name,
+        dob=current_student.date_of_birth.isoformat() if current_student.date_of_birth else None,
+        nationality=current_student.nationality,
+        state=current_student.state,
+        college=current.institution if current else None,
+        branch=current.specialization if current else None,
+        yearOfStudy=current.year_of_study_label if current else None,
+        cgpa=_fmt_num(current.cgpa) if current and current.cgpa is not None else None,
+        percentage=_fmt_num(current.percentage) if current and current.percentage is not None else None,
+        qualifications=[_entry_to_out(e) for e in past_quals],
+        workExperience=[
+            WorkExperienceEntry(company=w.company, role=w.role, duration=w.duration)
+            for w in work_rows
+        ],
+        hasHigherQualification=higher_qual is not None,
+        previousQualification=_entry_to_out(higher_qual) if higher_qual else None,
+    )
+
+
+@router.put("/profile", response_model=ProfileOut)
+def save_profile(
+    payload: ProfileIn,
+    current_student: Student = Depends(get_current_student),
+    db: Session = Depends(get_db),
+):
+    # Validate before changing anything.
+    try:
+        dob = date.fromisoformat(payload.dob.strip())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enter a valid date of birth.",
+        )
+
+    if dob > date.today():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Date of birth cannot be in the future.",
+        )
+
+    # Full replace: delete everything previously stored for this student
+    # and re-insert from the payload - avoids partial-update matching
+    # logic for a form that's edited and resubmitted as a whole.
+    db.query(Education).filter(Education.student_id == current_student.student_id).delete()
+    db.query(WorkExperience).filter(WorkExperience.student_id == current_student.student_id).delete()
+
+    # The name comes from signup; only change it if one is sent.
+    new_name = _clean(payload.name)
+    if new_name:
+        current_student.name = new_name
+
+    current_student.date_of_birth = dob
+    current_student.nationality = payload.nationality.strip()
+    current_student.state = payload.state.strip()
+
+    # --- current degree (optional) ------------------------------------
+    college = _clean(payload.college)
+    branch = _clean(payload.branch)
+    year_label = _clean(payload.yearOfStudy)
+    cgpa = _parse_float(payload.cgpa)
+    percentage = _parse_float(payload.percentage)
+
+    if any([college, branch, year_label, cgpa is not None, percentage is not None]):
+        db.add(Education(
+            student_id=current_student.student_id,
+            qualification="Bachelor's",
+            specialization=branch,
+            institution=college,
+            year_of_study_label=year_label,
+            current_year=_YEAR_LABEL_TO_INT.get(year_label or ""),
+            cgpa=cgpa,
+            percentage=percentage,
+            is_current=True,
+        ))
+
+    # --- earlier qualifications (blank rows are ignored) ----------------
+    for q in payload.qualifications:
+        if not any(_clean(v) for v in (q.institution, q.field, q.yearCompleted, q.score)):
+            continue
+
+        cgpa_q, pct_q = _parse_score(q.score)
+        db.add(Education(
+            student_id=current_student.student_id,
+            qualification=q.level,
+            specialization=_clean(q.field),
+            institution=_clean(q.institution),
+            year_of_passing=_parse_int(q.yearCompleted),
+            cgpa=cgpa_q,
+            percentage=pct_q,
+            is_current=False,
+        ))
+
+    if payload.hasHigherQualification and payload.previousQualification:
+        pq = payload.previousQualification
+
+        if any(_clean(v) for v in (pq.institution, pq.field, pq.yearCompleted, pq.score)):
+            cgpa_p, pct_p = _parse_score(pq.score)
+            db.add(Education(
+                student_id=current_student.student_id,
+                qualification=pq.level,
+                specialization=_clean(pq.field),
+                institution=_clean(pq.institution),
+                year_of_passing=_parse_int(pq.yearCompleted),
+                cgpa=cgpa_p,
+                percentage=pct_p,
+                is_current=False,
+                is_higher_qualification=True,
+            ))
+
+    # --- work experience (blank rows are ignored) -------------------------
+    for w in payload.workExperience:
+        if not any(_clean(v) for v in (w.company, w.role, w.duration)):
+            continue
+
+        db.add(WorkExperience(
+            student_id=current_student.student_id,
+            company=_clean(w.company),
+            role=_clean(w.role),
+            duration=_clean(w.duration),
+        ))
+
+    db.commit()
+    return get_profile(current_student=current_student, db=db)
+
+=== FILE: backend\app\routers\signup_verification_router.py ===
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.auth.security import create_access_token
+from app.database.session import get_db
+from app.schemas.auth import AuthResponse, StrictEmail, UserSummary
+from app.services.signup_verification_service import (
+    SignupVerificationError,
+    resend_code,
+    start_signup,
+    verify_signup,
+)
+
+router = APIRouter(prefix="/auth/register", tags=["auth-register"])
+
+
+class StartSignupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: StrictEmail
+    password: str = Field(min_length=6, max_length=128)
+
+
+class VerifySignupRequest(BaseModel):
+    email: StrictEmail
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class ResendCodeRequest(BaseModel):
+    email: StrictEmail
+
+
+def _http_error(exc: SignupVerificationError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.post("/start")
+def start(payload: StartSignupRequest, db: Session = Depends(get_db)):
+    """Step 1: email a verification code. No account is created yet."""
+
+    try:
+        return start_signup(
+            db,
+            name=payload.name,
+            email=payload.email,
+            password=payload.password,
+        )
+    except SignupVerificationError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/verify",
+    response_model=AuthResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def verify(payload: VerifySignupRequest, db: Session = Depends(get_db)):
+    """Step 2: confirm the code. The account is created only now."""
+
+    try:
+        student = verify_signup(db, email=payload.email, code=payload.code)
+    except SignupVerificationError as exc:
+        raise _http_error(exc) from exc
+
+    return AuthResponse(
+        token=create_access_token(student.student_id, "student"),
+        user=UserSummary(name=student.name, email=student.email),
+        hasProfile=False,
+    )
+
+
+@router.post("/resend")
+def resend(payload: ResendCodeRequest, db: Session = Depends(get_db)):
+    """Send a fresh code for a signup that is waiting for verification."""
+
+    try:
+        return resend_code(db, email=payload.email)
+    except SignupVerificationError as exc:
+        raise _http_error(exc) from exc
+
+=== FILE: backend\app\routers\tracked_exam_router.py ===
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from app.auth.dependencies import get_current_student
+from app.models.student import Student
+from app.schemas.tracked_exam import TrackedExamOut
+from app.services.tracked_exam_service import (
+    get_tracked_exams,
+    track_exam,
+    untrack_exam,
+)
+
+
+router = APIRouter(
+    prefix="/tracked-exams",
+    tags=["tracked-exams"],
+)
+
+
+@router.post(
+    "/{exam_id}",
+    response_model=TrackedExamOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def track_my_exam(
+    exam_id: int,
+    current_student: Student = Depends(
+        get_current_student
+    ),
+):
+    try:
+        tracking_id = track_exam(
+            student_id=current_student.student_id,
+            exam_id=exam_id,
+        )
+
+    except ValueError as exc:
+        message = str(exc)
+
+        if message in {
+            "Student not found",
+            "Exam not found",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=message,
+            )
+
+        if message == "Exam is already tracked":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=message,
+        )
+
+    tracked_exams = get_tracked_exams(
+        current_student.student_id
+    )
+
+    tracked_exam = next(
+        (
+            record
+            for record in tracked_exams
+            if record.tracking_id == tracking_id
+        ),
+        None,
+    )
+
+    if tracked_exam is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Tracked exam was created but "
+                "could not be retrieved."
+            ),
+        )
+
+    return tracked_exam
+
+
+@router.get(
+    "",
+    response_model=list[TrackedExamOut],
+)
+def get_my_tracked_exams(
+    current_student: Student = Depends(
+        get_current_student
+    ),
+):
+    try:
+        return get_tracked_exams(
+            current_student.student_id
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        )
+
+
+@router.delete(
+    "/{tracking_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def untrack_my_exam(
+    tracking_id: int,
+    current_student: Student = Depends(
+        get_current_student
+    ),
+):
+    try:
+        untrack_exam(
+            student_id=current_student.student_id,
+            tracking_id=tracking_id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        )
+
+    return None

@@ -261,6 +261,27 @@ def normalize_rule(
 
 
 # ============================================================
+# FREE-TEXT VALUES
+# ============================================================
+
+# Attributes whose value must be a short name that can be compared with
+# what a student typed ("India", "Kerala"). A sentence such as
+# "Indian origin (from Pakistan, Burma, ...)" can never be equal to a
+# student's nationality, so it is not a rule.
+_NAME_ATTRIBUTES = {"Nationality", "State"}
+
+
+def _is_free_text(rule: EligibilityRuleData) -> bool:
+    value = rule.value
+
+    return rule.attribute in _NAME_ATTRIBUTES and (
+        len(value) > 40
+        or "(" in value
+        or "," in value
+    )
+
+
+# ============================================================
 # RULE GROUP
 # ============================================================
 
@@ -269,6 +290,14 @@ def normalize_rule_group(
 ) -> EligibilityRuleGroupData:
     """
     Recursively normalize one rule group and all child groups.
+
+    Also tidies the tree:
+
+      * rules whose value is free text (not comparable) are dropped,
+      * groups left with nothing in them are dropped, and
+      * a group with no rules of its own and a single child is only a
+        wrapper, so the child replaces it (the result is identical for AND
+        and for OR, and the tree stops nesting three levels deep).
     """
 
     logical_operator = (
@@ -278,14 +307,25 @@ def normalize_rule_group(
     )
 
     normalized_rules = [
-        normalize_rule(rule)
-        for rule in group.rules
+        rule
+        for rule in (
+            normalize_rule(rule)
+            for rule in group.rules
+        )
+        if not _is_free_text(rule)
     ]
 
     normalized_child_groups = [
-        normalize_rule_group(child_group)
-        for child_group in group.child_groups
+        child
+        for child in (
+            normalize_rule_group(child_group)
+            for child_group in group.child_groups
+        )
+        if child.rules or child.child_groups
     ]
+
+    if not normalized_rules and len(normalized_child_groups) == 1:
+        return normalized_child_groups[0]
 
     return EligibilityRuleGroupData(
         logical_operator=logical_operator,
@@ -303,11 +343,19 @@ def normalize_eligibility_rules(
 ) -> EligibilityRulesData:
     """
     Normalize all eligibility rule groups recursively.
+
+    A top-level group with nothing left in it is dropped, so an extraction
+    that found no usable rule reports "no rule group" instead of carrying
+    an empty group around.
     """
 
     normalized_groups = [
-        normalize_rule_group(group)
-        for group in data.rule_groups
+        group
+        for group in (
+            normalize_rule_group(group)
+            for group in data.rule_groups
+        )
+        if group.rules or group.child_groups
     ]
 
     return EligibilityRulesData(

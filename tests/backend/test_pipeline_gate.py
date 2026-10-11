@@ -28,9 +28,15 @@ def test_exam_information(result):
     info = result.extraction.exam_information
     assert info.exam_name == "GATE 2027"
     assert info.conducting_body == "IIT Madras"
-    assert info.release_date == "2026-08-27"
-    assert info.application_start_date is None            # "To be Announced"
-    assert info.application_end_date == "2026-09-27"      # not the struck-out 09-21
+    # Revised brochure: the earlier dates (27 Aug release, 27 Sep end of
+    # applications) are struck out in it and are ignored as superseded.
+    assert info.application_start_date == "2026-09-02"
+    assert info.application_end_date == "2026-10-05"
+    # "Revised version, Date: 27th September 2026" is the date of the
+    # revision, after applications opened, so it is not stored as the release
+    # date (that would fail the approval rules).
+    assert info.release_date is None
+    assert any(i.code == "release-date-after-application" for i in result.issues)
     assert [(d.start_date, d.end_date) for d in info.exam_dates] == [
         ("2027-02-06", "2027-02-07"), ("2027-02-13", "2027-02-14"), ("2027-02-20", "2027-02-21")]
 
@@ -50,3 +56,4 @@ def test_rules_and_no_blocking_issues(result):
 def test_every_field_has_verified_evidence(result):
     verified = [e for e in result.evidence if e.verified]
     assert len(verified) >= 6 and all(e.page_numbers for e in verified)
+

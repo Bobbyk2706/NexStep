@@ -1,0 +1,747 @@
+
+=== FILE: backend\app\models\__init__.py ===
+from app.models.student import Student
+from app.models.education import Education
+from app.models.work_experience import WorkExperience
+from app.models.conducting_body import ConductingBody
+from app.models.exam import Exam
+from app.models.studentexameligibility import StudentExamEligibility
+from app.models.eligibility_attribute import EligibilityAttribute
+from app.models.eligibility_rule import EligibilityRule
+from app.models.eligibility_rule_group import EligibilityRuleGroup
+from app.models.notification import Notification
+from app.models.official_notification import OfficialNotification
+from app.models.tracked_exam import TrackedExam
+from app.models.extraction_history import ExtractionHistory
+from app.models.audit_log import AuditLog
+from app.models.admin import Admin
+from app.models.pending_signup import PendingSignup  # noqa: F401
+
+=== FILE: backend\app\models\admin.py ===
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+
+class Admin(Base):
+    __tablename__ = "admin"
+
+    admin_id: Mapped[int] = mapped_column(primary_key=True)
+
+    name: Mapped[str]
+    email: Mapped[str]
+    password_hash: Mapped[str]
+    account_status: Mapped[str | None]
+
+
+    # Added for auth integration (see database/migrations/0001_add_auth_columns.sql).
+    # Same purpose as Student.token_version — see that model for details.
+    token_version: Mapped[str | None]
+
+    updated_timestamp: Mapped[datetime | None]
+    created_timestamp: Mapped[datetime | None]
+
+    audit_logs: Mapped[list["AuditLog"]] = relationship(
+        back_populates="admin"
+    )
+
+=== FILE: backend\app\models\audit_log.py ===
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+
+class AuditLog(Base):
+    __tablename__ = "auditlog"
+
+    audit_id: Mapped[int] = mapped_column(primary_key=True)
+
+    admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admin.admin_id")
+    )
+
+    action_type: Mapped[str]
+    entity_type: Mapped[str]
+
+    entity_id: Mapped[int | None]
+    description: Mapped[str | None]
+    old_value: Mapped[str | None]
+    new_value: Mapped[str | None]
+
+    created_at: Mapped[datetime | None]
+
+    admin: Mapped["Admin | None"] = relationship(
+        back_populates="audit_logs"
+    )
+
+=== FILE: backend\app\models\base.py ===
+from sqlalchemy.orm import DeclarativeBase
+class Base(DeclarativeBase):
+    pass
+
+=== FILE: backend\app\models\conducting_body.py ===
+
+from app.models.base import Base
+from sqlalchemy.orm import Mapped,mapped_column, relationship
+
+class ConductingBody(Base):
+    __tablename__='conducting_body'
+    body_id:Mapped[int]=mapped_column(primary_key=True)
+    name:Mapped[str]=mapped_column()
+    main_website:Mapped[str]=mapped_column()
+    description:Mapped[str| None]=mapped_column()
+    logo_url:Mapped[str| None]=mapped_column()
+    exams:Mapped[list['Exam']]=relationship(
+        back_populates='body'
+    )
+
+=== FILE: backend\app\models\education.py ===
+from __future__ import annotations
+from app.models.student import Student
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.models.base import Base
+
+
+class Education(Base):
+    __tablename__ = "education"
+
+    education_id: Mapped[int] = mapped_column(primary_key=True)
+
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("student.student_id")
+    )
+
+    qualification: Mapped[str]
+    specialization: Mapped[str | None]
+    cgpa: Mapped[float | None]
+    percentage: Mapped[float | None]
+    current_year: Mapped[int | None]
+    year_of_passing: Mapped[int | None]
+    is_current: Mapped[bool | None]
+
+    # Added for the profile flow (see
+    # database/migrations/0002_profile_schema.sql).
+    institution: Mapped[str | None]
+    # e.g. "Final Year"/"Graduated" — the frontend's yearOfStudy is a
+    # label, not the numeric current_year above, so kept separate.
+    year_of_study_label: Mapped[str | None]
+    # True only on the single "previousQualification" entry — see
+    # migration 0002 for why this exists.
+    is_higher_qualification: Mapped[bool | None]
+
+    student: Mapped["Student"] = relationship(
+        back_populates="educations"
+    )
+
+=== FILE: backend\app\models\eligibility_attribute.py ===
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+
+class EligibilityAttribute(Base):
+    __tablename__ = "eligibilityattribute"
+
+    attribute_id: Mapped[int] = mapped_column(primary_key=True)
+
+    attribute_name: Mapped[str]
+    source_table: Mapped[str]
+    source_column: Mapped[str]
+    data_type: Mapped[str]
+    description: Mapped[str]
+    rules: Mapped[list['EligibilityRule']]=relationship(
+        back_populates='attribute'
+    )
+
+=== FILE: backend\app\models\eligibility_rule.py ===
+from __future__ import annotations
+
+from sqlalchemy import ForeignKey, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+
+class EligibilityRule(Base):
+    __tablename__ = "eligibilityrule"
+
+    rule_id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("eligibilityrulegroup.group_id")
+    )
+
+    attribute_id: Mapped[int] = mapped_column(
+        ForeignKey("eligibilityattribute.attribute_id")
+    )
+
+    operator: Mapped[str]
+
+    value: Mapped[str] = mapped_column(
+        Text
+    )
+
+    group: Mapped["EligibilityRuleGroup"] = relationship(
+        back_populates="rules"
+    )
+
+    attribute: Mapped["EligibilityAttribute"] = relationship(
+        back_populates="rules"
+    )
+
+=== FILE: backend\app\models\eligibility_rule_group.py ===
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.official_notification import OfficialNotification
+    from app.models.eligibility_rule import EligibilityRule
+
+
+class EligibilityRuleGroup(Base):
+    __tablename__ = "eligibilityrulegroup"
+
+    group_id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    notification_id: Mapped[int] = mapped_column(
+        ForeignKey("officialnotification.notification_id")
+    )
+
+    group_number: Mapped[int]
+
+    logical_operator: Mapped[str]
+
+    parent_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("eligibilityrulegroup.group_id")
+    )
+
+    rules: Mapped[list["EligibilityRule"]] = relationship(
+        back_populates="group"
+    )
+
+    notification: Mapped["OfficialNotification"] = relationship(
+        back_populates="rule_groups"
+    )
+
+    parent_group: Mapped["EligibilityRuleGroup | None"] = relationship(
+        remote_side="EligibilityRuleGroup.group_id",
+        back_populates="child_groups"
+    )
+
+    child_groups: Mapped[list["EligibilityRuleGroup"]] = relationship(
+        back_populates="parent_group"
+    )
+
+=== FILE: backend\app\models\exam.py ===
+from sqlalchemy.orm import Mapped, mapped_column,relationship
+from sqlalchemy import ForeignKey
+from app.models.base import Base
+class Exam(Base):
+    __tablename__ = "exam"
+
+    exam_id: Mapped[int] = mapped_column(primary_key=True)
+
+    body_id: Mapped[int]=mapped_column(ForeignKey('conducting_body.body_id'))
+
+    name: Mapped[str]
+    type: Mapped[str]
+    description: Mapped[str | None]
+    off_exam_page: Mapped[str | None]
+    status: Mapped[str | None]
+    body:Mapped['ConductingBody']=relationship(
+        back_populates='exams'
+    )
+    eligibility_records: Mapped[list["StudentExamEligibility"]] = relationship(
+    back_populates="exam"
+    )
+    official_notifications: Mapped[list["OfficialNotification"]] = relationship(
+    back_populates="exam"
+    )
+
+    notifications: Mapped[list["Notification"]] = relationship(
+        back_populates="exam"
+    )
+
+    tracked_exams: Mapped[list["TrackedExam"]] = relationship(
+        back_populates="exam"
+    )
+
+=== FILE: backend\app\models\exam_date.py ===
+from __future__ import annotations
+
+from datetime import date
+from typing import TYPE_CHECKING
+
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.official_notification import OfficialNotification
+
+
+class ExamDate(Base):
+    __tablename__ = "examdate"
+
+    exam_date_id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    notification_id: Mapped[int] = mapped_column(
+        ForeignKey("officialnotification.notification_id")
+    )
+
+    start_date: Mapped[date]
+    end_date: Mapped[date]
+
+    notification: Mapped["OfficialNotification"] = relationship(
+        back_populates="exam_dates"
+    )
+
+=== FILE: backend\app\models\extraction_history.py ===
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+from app.models.official_notification import OfficialNotification
+
+
+class ExtractionHistory(Base):
+    __tablename__ = "extractionhistory"
+
+    extraction_id: Mapped[int] = mapped_column(primary_key=True)
+
+    notification_id: Mapped[int] = mapped_column(
+        ForeignKey("officialnotification.notification_id")
+    )
+
+    extraction_type: Mapped[str]
+    source_pdf_path: Mapped[str]
+
+    extracted_content: Mapped[str | None]
+    ai_summary: Mapped[str | None]
+
+    change_detected: Mapped[bool]
+    change_details: Mapped[str | None]
+
+    extraction_status: Mapped[str]
+
+    created_at: Mapped[datetime | None]
+
+    notification: Mapped["OfficialNotification"] = relationship(
+        back_populates="extraction_history"
+    )
+
+=== FILE: backend\app\models\monitoring_review.py ===
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+
+class MonitoringReview(Base):
+    """
+    Human-in-the-loop review record for a monitored
+    notification change.
+
+    The review stores the complete AI/deterministic
+    analysis required by an administrator before the
+    change can be approved.
+    """
+
+    __tablename__ = "monitoringreview"
+
+    review_id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    notification_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "officialnotification.notification_id"
+        ),
+        nullable=False,
+    )
+
+    old_document_hash: Mapped[str]
+    new_document_hash: Mapped[str]
+
+    old_extraction: Mapped[str]
+    new_extraction: Mapped[str]
+
+    structural_changes: Mapped[str]
+    semantic_analysis: Mapped[str]
+    impact_analysis: Mapped[str]
+
+    review_status: Mapped[str] = mapped_column(
+        default="PENDING"
+    )
+
+    rejection_reason: Mapped[str | None] = mapped_column(
+        nullable=True
+    )
+
+    reviewed_by: Mapped[int | None] = mapped_column(
+        ForeignKey("admin.admin_id"),
+        nullable=True,
+    )
+
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        default=datetime.now
+    )
+
+    notification = relationship(
+        "OfficialNotification",
+    )
+
+    reviewer = relationship(
+        "Admin",
+    )
+
+=== FILE: backend\app\models\notification.py ===
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import ForeignKey, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+
+class Notification(Base):
+    __tablename__ = "notification"
+
+    notification_id: Mapped[int] = mapped_column(primary_key=True)
+
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("student.student_id")
+    )
+
+    exam_id: Mapped[int | None] = mapped_column(
+        ForeignKey("exam.exam_id")
+    )
+
+    notification_type: Mapped[str]
+    title: Mapped[str]
+    message: Mapped[str]
+    is_read: Mapped[bool]
+
+    created_at: Mapped[datetime | None]
+    read_at: Mapped[datetime | None]
+
+    # --- email delivery -------------------------------------------------
+    #
+    # Prevents the same event from notifying the same student twice
+    # (for example one deadline reminder tier). NULL = no de-duplication;
+    # PostgreSQL allows many NULLs in a unique index.
+    dedupe_key: Mapped[str | None] = mapped_column(
+        String(200), unique=True, index=True
+    )
+
+    # NULL (no email wanted) | PENDING | SENT | FAILED | SKIPPED
+    email_status: Mapped[str | None] = mapped_column(String(20))
+    email_sent_at: Mapped[datetime | None]
+    email_error: Mapped[str | None]
+
+    student: Mapped["Student"] = relationship(
+        back_populates="notifications"
+    )
+
+    exam: Mapped["Exam | None"] = relationship(
+        back_populates="notifications"
+    )
+
+=== FILE: backend\app\models\official_notification.py ===
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import TYPE_CHECKING
+
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+from app.models.exam_date import ExamDate
+
+
+if TYPE_CHECKING:
+    from app.models.exam import Exam
+    from app.models.eligibility_rule_group import EligibilityRuleGroup
+    from app.models.extraction_history import ExtractionHistory
+
+
+class OfficialNotification(Base):
+    __tablename__ = "officialnotification"
+
+    notification_id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+    exam_id: Mapped[int] = mapped_column(
+        ForeignKey("exam.exam_id")
+    )
+
+    title: Mapped[str]
+
+    notification_type: Mapped[str]
+
+    release_date: Mapped[date | None]
+
+    application_start_date: Mapped[date | None]
+
+    application_end_date: Mapped[date | None]
+
+    exam_dates: Mapped[list["ExamDate"]] = relationship(
+        back_populates="notification",
+        cascade="all, delete-orphan",
+    )
+
+    official_url: Mapped[str]
+
+    pdf_path: Mapped[str]
+
+    document_url: Mapped[str | None]
+    document_hash: Mapped[str | None]
+    ai_summary: Mapped[str | None]
+
+    ai_change_summary: Mapped[str | None]
+
+    approval_status: Mapped[str]
+
+    rejection_reason: Mapped[str | None]
+
+    downloaded_on: Mapped[datetime | None]
+
+    exam: Mapped["Exam"] = relationship(
+        back_populates="official_notifications"
+    )
+
+    rule_groups: Mapped[list["EligibilityRuleGroup"]] = relationship(
+        back_populates="notification"
+    )
+
+    extraction_history: Mapped[list["ExtractionHistory"]] = relationship(
+        back_populates="notification"
+    )
+
+=== FILE: backend\app\models\pending_signup.py ===
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base
+
+
+class PendingSignup(Base):
+    """
+    A signup that is waiting for email verification.
+
+    No Student row exists until the emailed code is confirmed. The
+    password is stored only as a bcrypt hash and the code only as a
+    salted hash.
+    """
+
+    __tablename__ = "pending_signup"
+
+    pending_id: Mapped[int] = mapped_column(primary_key=True)
+
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    password_hash: Mapped[str] = mapped_column(String(200))
+
+    code_hash: Mapped[str] = mapped_column(String(200))
+    expires_at: Mapped[datetime]
+
+    attempts: Mapped[int] = mapped_column(default=0, server_default="0")
+    send_count: Mapped[int] = mapped_column(default=1, server_default="1")
+
+    last_sent_at: Mapped[datetime]
+    created_at: Mapped[datetime]
+
+=== FILE: backend\app\models\student.py ===
+from __future__ import annotations
+from datetime import date
+from sqlalchemy.orm import Mapped,mapped_column,relationship
+from app.models.base import Base
+
+class Student(Base):
+    __tablename__='student'
+    student_id:Mapped[int]=mapped_column(primary_key=True)
+    name:Mapped[str]
+    email: Mapped[str]
+    password_hash: Mapped[str]
+    # These four used to be required at signup. The frontend's actual
+    # signup only collects name/email/password; DOB/nationality/state
+    # are filled in later via PUT /student/profile, and gender isn't
+    # collected by the profile form at all yet (see
+    # database/migrations/0002_profile_schema.sql). Nullable here so
+    # gender-based eligibility rules simply won't fire until/unless the
+    # frontend adds that field.
+    date_of_birth: Mapped[date | None]
+    nationality: Mapped[str | None]
+    state: Mapped[str | None]
+    gender: Mapped[str | None]
+
+
+    # Added for auth integration (see database/migrations/0001_add_auth_columns.sql).
+    # NULL/'' account_status is treated as active; only an explicit
+    # 'suspended'/'inactive'/'disabled' blocks login.
+    account_status: Mapped[str | None] = mapped_column(default="active")
+    # Bumped on every refresh-token issuance/rotation and on logout, so a
+    # refresh token's embedded "trv" claim can be checked against it to
+    # revoke old sessions.
+    token_version: Mapped[str | None]
+    
+
+
+
+
+
+    educations:Mapped[list['Education']]=relationship(
+        back_populates='student'
+    )
+    work_experiences: Mapped[list["WorkExperience"]] = relationship(
+        back_populates="student"
+    )
+    eligibility_records: Mapped[list["StudentExamEligibility"]] = relationship(
+    back_populates="student"
+    )
+    notifications: Mapped[list["Notification"]] = relationship(
+    back_populates="student"
+    )
+
+    tracked_exams: Mapped[list["TrackedExam"]] = relationship(
+        back_populates="student"
+    )
+
+=== FILE: backend\app\models\studentexameligibility.py ===
+from datetime import datetime
+
+from app.models.exam import Exam
+from app.models.student import Student
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column,relationship
+
+from app.models.base import Base
+
+
+class StudentExamEligibility(Base):
+    __tablename__ = "studentexameligibility"
+
+    eligibility_id: Mapped[int] = mapped_column(primary_key=True)
+
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("student.student_id")
+    )
+
+    exam_id: Mapped[int] = mapped_column(
+        ForeignKey("exam.exam_id")
+    )
+
+    eligibility_status: Mapped[str]
+    reason: Mapped[str | None]
+    evaluated_at: Mapped[datetime | None]
+    student: Mapped["Student"] = relationship(
+    back_populates="eligibility_records"
+    )
+
+    exam: Mapped["Exam"] = relationship(
+    back_populates="eligibility_records"
+    )
+
+=== FILE: backend\app\models\tracked_exam.py ===
+from __future__ import annotations
+
+from datetime import datetime
+
+from app.models.exam import Exam
+from app.models.student import Student
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+
+class TrackedExam(Base):
+    __tablename__ = "trackedexam"
+
+    tracking_id: Mapped[int] = mapped_column(primary_key=True)
+
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("student.student_id")
+    )
+
+    exam_id: Mapped[int] = mapped_column(
+        ForeignKey("exam.exam_id")
+    )
+
+    tracked_at: Mapped[datetime | None]
+    tracking_status: Mapped[str]
+
+    student: Mapped["Student"] = relationship(
+        back_populates="tracked_exams"
+    )
+
+    exam: Mapped["Exam"] = relationship(
+        back_populates="tracked_exams"
+    )
+
+=== FILE: backend\app\models\work_experience.py ===
+from __future__ import annotations
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.models.base import Base
+
+
+class WorkExperience(Base):
+    __tablename__ = "work_experience"
+
+    work_experience_id: Mapped[int] = mapped_column(primary_key=True)
+
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("student.student_id")
+    )
+
+    company: Mapped[str | None]
+    role: Mapped[str | None]
+    duration: Mapped[str | None]
+
+    student: Mapped["Student"] = relationship(
+        back_populates="work_experiences"
+    )

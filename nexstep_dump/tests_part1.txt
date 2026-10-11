@@ -1,0 +1,1308 @@
+
+=== FILE: tests\backend\conftest.py ===
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "backend"))
+import tempfile
+
+# A file database (not :memory:) so the app's worker threads and the
+# test share the same data.
+_DB_DIR = tempfile.mkdtemp(prefix="nexstep-test-")
+os.environ["DATABASE_URL"] = f"sqlite:///{_DB_DIR}/test.db"
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret")
+os.environ.setdefault("NEXSTEP_GROQ_TPM", "0")          # no real limiter in tests
+os.environ.setdefault("NEXSTEP_TOKENIZER", "chars")
+
+GATE_PDF = ROOT / "backend" / "storage" / "notifications" / "GATE2027-IB.pdf"
+
+
+=== FILE: tests\backend\fake_llm.py ===
+"""Scripted stand-in for a real LLM: reads the passages it is given and
+answers like a competent model would, citing real passage ids/quotes."""
+from __future__ import annotations
+
+import json
+import re
+
+from app.ai.providers.base import AIProvider
+
+
+def passage_id(context: str, needle: str) -> str | None:
+    for block in re.split(r"\n\n(?=\[P\d+ \|)", context):
+        if needle in block:
+            m = re.match(r"\[(P\d+) \|", block)
+            if m:
+                return m.group(1)
+    return None
+
+
+def fact(context: str, value, needle: str):
+    return {"value": value, "quote": needle, "passage": passage_id(context, needle)}
+
+
+EMPTY = {"value": None, "quote": None, "passage": None}
+
+
+class ScriptedProvider(AIProvider):
+    name = "scripted"
+
+    def __init__(self, script=None):
+        self.calls: list[str] = []
+        self.script = script  # optional override: fn(task, context) -> dict|str
+
+    def generate(self, *, messages, response_schema=None, model=None,
+                 temperature=0.0, max_tokens=None):
+        user = next(m["content"] for m in messages if m["role"] == "user")
+        context = user.split("PASSAGES:\n", 1)[-1]
+        task = ("identity" if "identify the examination" in user else
+                "dates" if "extract the schedule" in user else "eligibility")
+        self.calls.append(task)
+        if self.script:
+            out = self.script(task, context)
+            return out if isinstance(out, str) else json.dumps(out)
+        return json.dumps(getattr(self, f"_{task}")(context))
+
+    def _identity(self, c):
+        return {"exam_name": fact(c, "GATE 2027", "GATE 2027"),
+                "conducting_body": fact(c, "IIT Madras", "IIT Madras"),
+                "release_date": fact(c, "2026-08-27", "27th August 2026")}
+
+    def _dates(self, c):
+        return {
+            "application_start_date": EMPTY,
+            "application_end_date": fact(c, "2026-09-27", "Sunday, September 27, 2026"),
+            "late_fee_end_date": fact(c, "2026-10-05", "Monday, October 5, 2026"),
+            "exam_dates": [
+                {"label": "Week 1", "start_date": "2027-02-06", "end_date": "2027-02-07",
+                 "quote": "February 6 & 7, 2027", "passage": passage_id(c, "February 6 & 7, 2027")},
+                {"label": "Week 2", "start_date": "2027-02-13", "end_date": "2027-02-14",
+                 "quote": "February 13 & 14, 2027", "passage": passage_id(c, "February 13 & 14, 2027")},
+                {"label": "Week 3", "start_date": "2027-02-20", "end_date": "2027-02-21",
+                 "quote": "February 20 & 21, 2027", "passage": passage_id(c, "February 20 & 21, 2027")},
+            ]}
+
+    def _eligibility(self, c):
+        q = "third or higher years of any undergraduate"
+        return {
+            "has_no_age_limit": True, "age_limits": [],
+            "qualifications": [
+                {"level": lvl, "field": "Engineering/Technology/Science/Commerce/Arts",
+                 "quote": q, "passage": passage_id(c, q)}
+                for lvl in ("Bachelor's", "Master's", "PhD")],
+            "minimum_percentage": None, "minimum_cgpa": None,
+            "score_quote": None, "score_passage": None,
+            "nationalities": [], "nationality_quote": None, "nationality_passage": None,
+            "work_experience": EMPTY,
+            "other_requirements": [{"text": "Currently in the third year or higher of a UG program, or degree completed",
+                                    "quote": q, "passage": passage_id(c, q)}]}
+
+
+# Names used by test_e2e_workflow.py
+GATE_ANSWERS = None
+
+
+class FakeProvider(ScriptedProvider):
+    def __init__(self, answers=None):
+        super().__init__(None)
+
+
+=== FILE: tests\backend\test_e2e_workflow.py ===
+"""
+End to end through the real application: extraction workflow -> admin
+review API -> approval -> student eligibility. Only the LLM (scripted)
+and the web-source verification step are replaced.
+"""
+from datetime import date
+from types import SimpleNamespace
+
+import pytest
+from fastapi.testclient import TestClient
+
+from conftest import GATE_PDF
+from fake_llm import FakeProvider, GATE_ANSWERS
+
+pytestmark = pytest.mark.skipif(not GATE_PDF.exists(), reason="GATE sample PDF missing")
+
+
+@pytest.fixture(scope="module")
+def app_env():
+    import app.models  # noqa: F401  (register every table)
+    from app.auth.security import hash_password
+    from app.database.engine import engine
+    from app.database.session import SessionLocal
+    from app.models.admin import Admin
+    from app.models.base import Base
+    from app.models.conducting_body import ConductingBody
+    from app.models.education import Education
+    from app.models.eligibility_attribute import EligibilityAttribute
+    from app.models.exam import Exam
+    from app.models.student import Student
+    import app.ai.extraction.pipeline as pipeline
+    from app.ai.provider_manager import AIProviderManager
+
+    Base.metadata.create_all(engine)
+
+    with SessionLocal() as db:
+        for name, table, column, dtype in [
+            ("CGPA", "education", "cgpa", "numeric"),
+            ("Percentage", "education", "percentage", "numeric"),
+            ("Specialization", "education", "specialization", "text"),
+            ("Date of Birth", "student", "date_of_birth", "date"),
+            ("Nationality", "student", "nationality", "text"),
+            ("State", "student", "state", "text"),
+            ("Educational Qualification", "education", "qualification", "text"),
+            ("Work Experience", "work_experience", "duration", "text"),
+        ]:
+            db.add(EligibilityAttribute(attribute_name=name, source_table=table,
+                                        source_column=column, data_type=dtype, description=name))
+
+        body = ConductingBody(name="Placeholder body", main_website="https://example.org/")
+        db.add(body)
+        db.flush()
+        exam = Exam(body_id=body.body_id, name="GATE 2027", type="Entrance", status="ACTIVE",
+                    description=None, off_exam_page="https://gate2027.iitm.ac.in/")
+        db.add(exam)
+
+        db.add(Admin(name="Admin", email="admin@test.com", password_hash=hash_password("adminpass123"),
+                     account_status="active"))
+
+        def student(email, level):
+            s = Student(name=email, email=email, password_hash=hash_password("studentpass1"),
+                        date_of_birth=date(2003, 5, 5), nationality="Indian", state="Kerala",
+                        gender="F", account_status="active")
+            db.add(s)
+            db.flush()
+            db.add(Education(student_id=s.student_id, qualification=level, specialization="CS",
+                             cgpa=8.0, percentage=None, current_year=3, year_of_passing=None,
+                             is_current=True, institution="X", year_of_study_label="3rd Year",
+                             is_higher_qualification=False))
+
+        student("btech@test.com", "Bachelor's")
+        student("school@test.com", "12th / Senior Secondary")
+        db.commit()
+        exam_id = exam.exam_id
+
+    provider = FakeProvider(GATE_ANSWERS)
+    pipeline._default_manager = AIProviderManager(providers=[provider])
+
+    from app.main import app
+    yield SimpleNamespace(client=TestClient(app), exam_id=exam_id, provider=provider)
+    pipeline._default_manager = None
+
+
+def _login(client, url, email, password):
+    r = client.post(url, json={"email": email, "password": password})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body.get("access_token") or body["token"]
+
+
+def test_full_workflow(app_env, monkeypatch, tmp_path):
+    from app.services import exam_pipeline_service as svc
+    monkeypatch.setenv("NEXSTEP_GROQ_TPM", "0")
+
+    pdf = GATE_PDF.read_bytes()
+    url = "https://gate2027.iitm.ac.in/static/doc/IB/GATE2027-IB.pdf"
+    monkeypatch.setattr(svc, "verify_exam_source", lambda name, sources: SimpleNamespace(
+        relevant=True, selected_url=url, source_type="OFFICIAL_NOTIFICATION"))
+
+    # ---- 1. extraction workflow (what the admin "Add exam" button runs)
+    outcome = svc.process_exam(
+        app_env.exam_id, "GATE 2027", "https://gate2027.iitm.ac.in/",
+        known_source={"url": url, "document_url": url, "pdf_path": str(GATE_PDF),
+                      "document_hash": "abc123", "content": pdf})
+    assert outcome["status"] == "PENDING"
+    extraction_id = outcome["extraction_id"]
+
+    # ---- 2. admin review API
+    client = app_env.client
+    admin = {"Authorization": "Bearer " + _login(client, "/api/auth/admin/login", "admin@test.com", "adminpass123")}
+
+    rows = client.get("/admin/extractions", headers=admin).json()
+    assert rows[0]["status"] == "PENDING"
+
+    detail = client.get(f"/admin/extractions/{extraction_id}", headers=admin).json()
+    import json
+    content = json.loads(detail["extracted_content"])
+    assert content["pipeline"]["version"] == "2.0"
+    assert content["extraction"]["exam_information"]["application_end_date"] == "2026-09-27"
+    assert {i["code"] for i in content["issues"]} >= {"start-tba", "superseded-ignored"}
+    assert all(e["page_numbers"] for e in content["evidence"] if e["verified"])
+    assert "GATE 2027" in detail["ai_summary"]
+
+    # ---- 3. approve -> published as authoritative data
+    r = client.post(f"/admin/extractions/{extraction_id}/approve", headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "APPROVED"
+
+    exam = client.get(f"/api/exams/{app_env.exam_id}").json() if False else None
+
+    # ---- 4. students are evaluated against the approved rules
+    def verdict(email):
+        token = _login(client, "/api/auth/login", email, "studentpass1")
+        h = {"Authorization": f"Bearer {token}"}
+        r = client.post(f"/api/eligibility/{app_env.exam_id}/evaluate", headers=h)
+        assert r.status_code in (200, 201), r.text
+        return r.json()
+
+    assert verdict("btech@test.com")["eligibility_status"] == "ELIGIBLE"
+    assert verdict("school@test.com")["eligibility_status"] != "ELIGIBLE"
+
+
+def test_reject_then_retry_uses_feedback(app_env, monkeypatch):
+    from app.services import exam_pipeline_service as svc
+    monkeypatch.setenv("NEXSTEP_GROQ_TPM", "0")
+    url = "https://gate2027.iitm.ac.in/static/doc/IB/GATE2027-IB.pdf"
+    monkeypatch.setattr(svc, "verify_exam_source", lambda name, sources: SimpleNamespace(
+        relevant=True, selected_url=url, source_type="OFFICIAL_NOTIFICATION"))
+    out = svc.process_exam(app_env.exam_id, "GATE 2027", "https://gate2027.iitm.ac.in/",
+                           known_source={"url": url, "document_url": url, "pdf_path": str(GATE_PDF),
+                                         "document_hash": __import__("hashlib").sha256(GATE_PDF.read_bytes()).hexdigest(), "content": GATE_PDF.read_bytes()})
+
+    client = app_env.client
+    admin = {"Authorization": "Bearer " + _login(client, "/api/auth/admin/login", "admin@test.com", "adminpass123")}
+    eid = out["extraction_id"]
+
+    r = client.post(f"/admin/extractions/{eid}/reject", headers=admin,
+                    json={"feedback": "The application end date looks wrong, please re-check."})
+    assert r.status_code == 200, r.text
+
+    seen_before = len(app_env.provider.calls)
+    r = client.post(f"/admin/extractions/{eid}/retry", headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["extraction_type"] == "RETRY_EXTRACTION"
+    assert len(app_env.provider.calls) == seen_before + 3
+
+    new_id = r.json()["extraction_id"]
+    assert new_id != eid
+    assert client.get(f"/admin/extractions/{new_id}", headers=admin).json()["status"] == "PENDING"
+
+
+=== FILE: tests\backend\test_eligibility_fixes.py ===
+"""
+Tests for the eligibility-rule fixes:
+
+  * age limits -> date-of-birth rules ("must not have attained 32")
+  * category concessions are not competing age limits
+  * quotes recovered from the document when the model gives none
+  * free-text nationality conditions are not rules
+  * rule-tree tidying in the normalizer
+  * evaluation: release date, reasons, empty groups, qualification levels
+"""
+
+from datetime import date
+from types import SimpleNamespace as NS
+
+from app.ai.eligibility_rule_normalizer import normalize_eligibility_rules
+from app.ai.eligibility_schemas import (
+    EligibilityRuleData,
+    EligibilityRuleGroupData,
+    EligibilityRulesData,
+)
+from app.ai.extraction import compiler, facts
+from app.ai.extraction.age_rules import (
+    dob_boundary,
+    find_age_reference_date,
+    is_exclusive,
+    parse_explicit_dob_limits,
+)
+from app.ai.extraction.dates import date_set
+from app.ai.extraction.grounding import Grounder, document_dates
+from app.ai.extraction.structure import Passage
+from app.services.eligibility_service import (
+    _RuleGroupNode,
+    _evaluate_rule_group,
+    _get_latest_approved_notification,
+    check_rule,
+)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+def _passage(number: int, text: str) -> Passage:
+    return Passage(
+        id=f"P{number}",
+        index=number - 1,
+        page_start=1,
+        page_end=1,
+        section="Eligibility",
+        text=text,
+        tokens=0,
+    )
+
+
+def _compile(draft, *passages):
+    by_id = {p.id: p for p in passages}
+
+    grounder = Grounder(
+        passages=by_id,
+        doc_dates=document_dates([p.text for p in passages]),
+    )
+
+    context = "\n\n".join(p.tagged() for p in passages)
+
+    info, rules = compiler.compile_eligibility(draft, grounder, context)
+
+    return info, rules, grounder
+
+
+def _dob_rules(rules):
+    return sorted(
+        (r.operator, r.value)
+        for g in rules.rule_groups
+        for r in g.rules
+        if r.attribute == "Date of Birth"
+    )
+
+
+UPSC_AGE = (
+    "A candidate must have attained the age of 21 years and must not have "
+    "attained the age of 32 years on the 1st of August, 2025."
+)
+
+UPSC_RELAXATION = (
+    "The upper age limit prescribed above will be relaxable up to a maximum "
+    "of five years if a candidate belongs to a Scheduled Caste or a "
+    "Scheduled Tribe.\n"
+    "Up to a maximum of three years in the case of candidates belonging to "
+    "Other Backward Classes."
+)
+
+UPSC_NATIONALITY = (
+    "A candidate must be: (a) a citizen of India, or (b) a subject of Nepal, "
+    "or (c) a subject of Bhutan, or (d) a person of Indian origin who has "
+    "migrated from Pakistan, Burma, Sri Lanka."
+)
+
+UPSC_DEGREE = (
+    "A candidate must hold a degree of any of the Universities incorporated "
+    "by an Act of the Central or State Legislature in India."
+)
+
+
+def _upsc_draft(**overrides):
+    quote = (
+        "must have attained the age of 21 years and must not have attained "
+        "the age of 32 years on the 1st of August, 2025"
+    )
+
+    values = dict(
+        age_limits=[
+            facts.AgeLimit(kind="minimum", years=21, as_on_date="2025-08-01",
+                           quote=quote, passage="P1"),
+            facts.AgeLimit(kind="maximum", years=32, as_on_date="2025-08-01",
+                           quote=quote, passage="P1"),
+            facts.AgeLimit(
+                kind="maximum", years=37, as_on_date="2025-08-01",
+                quote="up to a maximum of five years if a candidate belongs "
+                      "to a Scheduled Caste or a Scheduled Tribe",
+                passage="P2"),
+            facts.AgeLimit(
+                kind="maximum", years=35, as_on_date="2025-08-01",
+                quote="in the case of candidates belonging to Other "
+                      "Backward Classes",
+                passage="P2"),
+        ],
+        qualifications=[facts.QualificationFact(level="Bachelor's")],
+        nationalities=[
+            "India", "Nepal", "Bhutan",
+            "Indian origin (from Pakistan, Burma, Sri Lanka)",
+        ],
+        nationality_quote=(
+            "A candidate must be: (a) a citizen of India, or (b) a subject "
+            "of Nepal, or (c) a subject of Bhutan"
+        ),
+        nationality_passage="P3",
+        work_experience=facts.Fact(),
+    )
+
+    values.update(overrides)
+
+    return facts.EligibilityDraft(**values)
+
+
+# ---------------------------------------------------------------------------
+# age arithmetic
+# ---------------------------------------------------------------------------
+
+def test_not_attained_is_exclusive():
+    assert is_exclusive("maximum", "must not have attained the age of 32 years")
+    assert is_exclusive("maximum", "below 32 years")
+    assert not is_exclusive("maximum", "must not exceed 32 years")
+    assert not is_exclusive("maximum", "up to 32 years of age")
+    assert not is_exclusive("minimum", "must have attained the age of 21")
+
+
+def test_dob_boundaries_for_upsc_2025():
+    reference = date(2025, 8, 1)
+
+    assert dob_boundary("minimum", 21, reference) == ("<=", date(2004, 8, 1))
+    assert dob_boundary("maximum", 32, reference, exclusive=True) == (
+        ">=", date(1993, 8, 2)
+    )
+    # inclusive wording gives the older boundary
+    assert dob_boundary("maximum", 32, reference) == (">=", date(1992, 8, 2))
+
+
+def test_day_with_of_is_a_date():
+    assert date_set("on the 1st of August, 2025") == {date(2025, 8, 1)}
+
+
+def test_explicit_birth_dates_are_parsed():
+    found = parse_explicit_dob_limits(
+        "born not earlier than 2nd August, 1993 and not later than "
+        "1st August, 2004"
+    )
+
+    assert found["earliest"][0] == date(1993, 8, 2)
+    assert found["latest"][0] == date(2004, 8, 1)
+
+
+def test_application_deadline_is_not_a_birth_limit():
+    found = parse_explicit_dob_limits(
+        "Last date for receipt of applications: not later than 11.02.2025."
+    )
+
+    assert found["earliest"] is None
+    assert found["latest"] is None
+
+
+def test_reference_date_needs_to_be_unambiguous():
+    assert find_age_reference_date(UPSC_AGE) == date(2025, 8, 1)
+    assert find_age_reference_date(
+        "Age as on 01.08.2025 for posts A. Age as on 01.01.2026 for posts B."
+    ) is None
+
+
+# ---------------------------------------------------------------------------
+# compiler
+# ---------------------------------------------------------------------------
+
+def test_upsc_age_limits_and_concessions():
+    info, rules, grounder = _compile(
+        _upsc_draft(),
+        _passage(1, UPSC_AGE),
+        _passage(2, UPSC_RELAXATION),
+        _passage(3, UPSC_NATIONALITY),
+        _passage(4, UPSC_DEGREE),
+    )
+
+    assert _dob_rules(rules) == [
+        ("<=", "2004-08-01"),
+        (">=", "1993-08-02"),
+    ]
+
+    assert info.minimum_age == 21
+    assert info.maximum_age == 31
+
+    # SC/ST and OBC concessions are not competing values of the same limit
+    assert grounder.conflicts == []
+    assert any("Age maximum 37" in text for text in info.other_requirements)
+    assert any("Age maximum 35" in text for text in info.other_requirements)
+
+
+def test_missing_qualification_quote_is_recovered():
+    info, rules, grounder = _compile(
+        _upsc_draft(),
+        _passage(1, UPSC_AGE),
+        _passage(2, UPSC_RELAXATION),
+        _passage(3, UPSC_NATIONALITY),
+        _passage(4, UPSC_DEGREE),
+    )
+
+    levels = [
+        r.value
+        for g in rules.rule_groups
+        for child in g.child_groups
+        for r in child.rules
+        if r.attribute == "Educational Qualification"
+    ]
+
+    assert levels == ["Bachelor's"]
+    assert any(i.code == "quote-recovered" for i in grounder.issues)
+
+
+def test_free_text_nationality_is_not_a_rule():
+    info, rules, _ = _compile(
+        _upsc_draft(),
+        _passage(1, UPSC_AGE),
+        _passage(2, UPSC_RELAXATION),
+        _passage(3, UPSC_NATIONALITY),
+        _passage(4, UPSC_DEGREE),
+    )
+
+    countries = [
+        r.value
+        for g in rules.rule_groups
+        for child in g.child_groups
+        for r in child.rules
+        if r.attribute == "Nationality"
+    ]
+
+    assert countries == ["India", "Nepal", "Bhutan"]
+    assert info.nationality == "India, Nepal, Bhutan"
+    assert any(
+        text.startswith("Nationality: Indian origin")
+        for text in info.other_requirements
+    )
+
+
+def test_notice_birth_dates_replace_calculated_ones():
+    explicit = (
+        "Candidates must have been born not earlier than 2nd August, 1993 "
+        "and not later than 1st August, 2004."
+    )
+
+    _, rules, _ = _compile(
+        _upsc_draft(),
+        _passage(1, UPSC_AGE + " " + explicit),
+        _passage(2, UPSC_RELAXATION),
+        _passage(3, UPSC_NATIONALITY),
+        _passage(4, UPSC_DEGREE),
+    )
+
+    assert _dob_rules(rules) == [
+        ("<=", "2004-08-01"),
+        (">=", "1993-08-02"),
+    ]
+
+
+def test_age_range_quote_and_reference_date_from_notice():
+    text = "Age limit: 18-27 years (as on 01-08-2026)."
+
+    draft = facts.EligibilityDraft(
+        age_limits=[
+            facts.AgeLimit(kind="minimum", years=18,
+                           quote="Age limit: 18-27 years (as on 01-08-2026)",
+                           passage="P1"),
+            facts.AgeLimit(kind="maximum", years=27,
+                           quote="Age limit: 18-27 years (as on 01-08-2026)",
+                           passage="P1"),
+        ],
+        work_experience=facts.Fact(),
+    )
+
+    _, rules, _ = _compile(draft, _passage(1, text))
+
+    assert _dob_rules(rules) == [
+        ("<=", "2008-08-01"),
+        (">=", "1998-08-02"),
+    ]
+
+
+def test_paraphrased_requirement_is_kept_when_numbers_match():
+    text = "Candidates must have been born not earlier than 02.08.1996."
+
+    draft = facts.EligibilityDraft(
+        other_requirements=[
+            facts.TextItem(
+                text="Born on or after 2 August 1996",
+                quote="born not earlier than 02.08.1996",
+                passage="P1",
+            ),
+            facts.TextItem(
+                text="Born on or after 2 August 1990",
+                quote="born not earlier than 02.08.1996",
+                passage="P1",
+            ),
+        ],
+        work_experience=facts.Fact(),
+    )
+
+    info, _, _ = _compile(draft, _passage(1, text))
+
+    assert info.other_requirements == ["Born on or after 2 August 1996"]
+
+
+def test_no_nationality_means_no_nationality_warning():
+    draft = facts.EligibilityDraft(work_experience=facts.Fact())
+
+    _, _, grounder = _compile(draft, _passage(1, "Eligibility."))
+
+    assert not any(i.field == "Nationality" for i in grounder.issues)
+
+
+# ---------------------------------------------------------------------------
+# normalizer
+# ---------------------------------------------------------------------------
+
+def test_wrapper_groups_are_flattened_and_free_text_dropped():
+    tree = EligibilityRulesData(rule_groups=[
+        EligibilityRuleGroupData(
+            logical_operator="AND",
+            rules=[],
+            child_groups=[
+                EligibilityRuleGroupData(
+                    logical_operator="AND",
+                    rules=[
+                        EligibilityRuleData(attribute="Date of Birth",
+                                            operator="<=", value="2004-08-01"),
+                    ],
+                    child_groups=[
+                        EligibilityRuleGroupData(
+                            logical_operator="OR",
+                            rules=[
+                                EligibilityRuleData(
+                                    attribute="Nationality", operator="=",
+                                    value="India"),
+                                EligibilityRuleData(
+                                    attribute="Nationality", operator="=",
+                                    value="Indian origin (from Pakistan, "
+                                          "Burma)"),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ])
+
+    result = normalize_eligibility_rules(tree)
+
+    assert len(result.rule_groups) == 1
+
+    top = result.rule_groups[0]
+
+    assert top.logical_operator == "AND"
+    assert [r.attribute for r in top.rules] == ["Date of Birth"]
+    assert len(top.child_groups) == 1
+    assert [r.value for r in top.child_groups[0].rules] == ["India"]
+
+
+def test_group_with_nothing_left_is_dropped():
+    tree = EligibilityRulesData(rule_groups=[
+        EligibilityRuleGroupData(
+            logical_operator="OR",
+            rules=[
+                EligibilityRuleData(attribute="Nationality", operator="=",
+                                    value="Indian origin (from Pakistan)"),
+            ],
+        ),
+    ])
+
+    assert normalize_eligibility_rules(tree).rule_groups == []
+
+
+# ---------------------------------------------------------------------------
+# evaluation
+# ---------------------------------------------------------------------------
+
+def _rule(attribute, operator, value, data_type="text"):
+    return NS(
+        attribute=NS(attribute_name=attribute, data_type=data_type),
+        operator=operator,
+        value=value,
+    )
+
+
+def _student(nationality="Indian", dob=date(1990, 1, 1), qualification="B.Tech"):
+    return NS(
+        nationality=nationality,
+        state=None,
+        gender=None,
+        date_of_birth=dob,
+        educations=[NS(is_current=True, qualification=qualification,
+                       cgpa=None, percentage=None, specialization=None,
+                       current_year=None, year_of_passing=None)],
+        work_experiences=[],
+    )
+
+
+def _nationality_group():
+    return _RuleGroupNode(
+        "OR",
+        [_rule("Nationality", "=", c) for c in ("India", "Nepal", "Bhutan")],
+        [],
+    )
+
+
+def test_satisfied_or_group_does_not_list_unmet_alternatives():
+    group = _RuleGroupNode(
+        "AND",
+        [_rule("Date of Birth", ">=", "1993-08-02", "date")],
+        [_nationality_group()],
+    )
+
+    result = _evaluate_rule_group(_student(), group)
+
+    assert result.eligible is False
+    assert len(result.reasons) == 1
+    assert "Date of Birth" in result.reasons[0]
+    assert not any("Nepal" in r or "Bhutan" in r for r in result.reasons)
+
+
+def test_empty_wrapper_group_is_ignored():
+    group = _RuleGroupNode(
+        "AND",
+        [],
+        [
+            _RuleGroupNode("AND", [], []),
+            _nationality_group(),
+        ],
+    )
+
+    assert _evaluate_rule_group(_student(), group).eligible is True
+
+
+def test_higher_qualification_meets_a_bachelors_requirement():
+    rule = _rule("Educational Qualification", "=", "Bachelor's")
+
+    assert check_rule(_student(qualification="B.Tech"), rule) is True
+    assert check_rule(_student(qualification="Master's"), rule) is True
+    assert check_rule(_student(qualification="PhD"), rule) is True
+    assert check_rule(_student(qualification="12th"), rule) is False
+
+
+def test_notice_without_release_date_can_still_be_used():
+    exam = NS(official_notifications=[
+        NS(approval_status="APPROVED", release_date=None, notification_id=3),
+        NS(approval_status="APPROVED", release_date=None, notification_id=4),
+        NS(approval_status="PENDING", release_date=date(2026, 1, 1),
+           notification_id=5),
+    ])
+
+    assert _get_latest_approved_notification(exam).notification_id == 4
+
+
+def test_dated_notice_still_beats_newer_undated_one():
+    exam = NS(official_notifications=[
+        NS(approval_status="APPROVED", release_date=date(2025, 1, 22),
+           notification_id=1),
+        NS(approval_status="APPROVED", release_date=None, notification_id=2),
+    ])
+
+    assert _get_latest_approved_notification(exam).notification_id == 1
+
+
+# ---------------------------------------------------------------------------
+# SSC JE style notice: limits differ by post, nationality sentence
+# ---------------------------------------------------------------------------
+
+SSC_AGE = (
+    "For the posts for which the age limit is up to 30 years | Candidate "
+    "must have been born not earlier than 02.08.1996 and not later than "
+    "01.08.2008. For the posts for which the age limit is up to 32 years | "
+    "Candidate must have been born not earlier than 02.08.1994 and not "
+    "later than 01.08.2008."
+)
+
+SSC_NATIONALITY = (
+    "6.1 A candidate must be either: (a) a citizen of India, or (b) a "
+    "subject of Nepal, or (c) a subject of Bhutan, or (d) a person of "
+    "Indian origin who has migrated from Pakistan, Burma, Sri Lanka, East "
+    "African countries of Kenya, Uganda, the United Republic of Tanzania, "
+    "Zambia, Malawi, Zaire, Ethiopia, and Vietnam with the intention of "
+    "permanently settling in India."
+)
+
+
+def test_post_wise_birth_dates_use_the_most_generous_limit():
+    found = parse_explicit_dob_limits(SSC_AGE)
+
+    assert found["earliest"][0] == date(1994, 8, 2)
+    assert found["latest"][0] == date(2008, 8, 1)
+    assert found["varies"] is True
+
+
+def test_post_wise_birth_dates_are_reported_by_the_compiler():
+    draft = facts.EligibilityDraft(work_experience=facts.Fact())
+
+    _, rules, grounder = _compile(draft, _passage(1, SSC_AGE))
+
+    assert _dob_rules(rules) == [
+        ("<=", "2008-08-01"),
+        (">=", "1994-08-02"),
+    ]
+    assert any(i.code == "dob-varies-by-post" for i in grounder.issues)
+
+
+def test_countries_people_migrated_from_are_not_nationalities():
+    draft = facts.EligibilityDraft(
+        nationalities=[
+            "India", "Nepal", "Bhutan", "Pakistan", "Burma", "Sri Lanka",
+            "Kenya", "Uganda", "Tanzania", "Zambia", "Malawi", "Zaire",
+            "Ethiopia", "Vietnam",
+        ],
+        nationality_quote=SSC_NATIONALITY[:300],
+        nationality_passage="P1",
+        work_experience=facts.Fact(),
+    )
+
+    info, rules, _ = _compile(draft, _passage(1, SSC_NATIONALITY))
+
+    countries = [
+        r.value
+        for g in rules.rule_groups
+        for child in g.child_groups
+        for r in child.rules
+        if r.attribute == "Nationality"
+    ]
+
+    assert countries == ["India", "Nepal", "Bhutan"]
+    assert info.nationality == "India, Nepal, Bhutan"
+    assert any(
+        "migrated from Pakistan" in text for text in info.other_requirements
+    )
+
+=== FILE: tests\backend\test_monitoring.py ===
+# $env:PYTHONPATH="$PWD\backend"
+# uv run python tests\backend\test_monitoring.py > monitoring_result.txt
+
+
+from app.scheduler.monitoring_scheduler import (
+    run_monitoring_cycle_now,
+)
+
+
+if __name__ == "__main__":
+
+    print("=" * 60)
+    print("STARTING MONITORING TEST")
+    print("=" * 60)
+
+    result = run_monitoring_cycle_now()
+
+    print()
+    print("MONITORING RESULT")
+    print("=" * 60)
+
+    print(result)
+
+    print("=" * 60)
+    print("TEST FINISHED")
+    print("=" * 60)
+
+=== FILE: tests\backend\test_pipeline_gate.py ===
+from datetime import date
+
+import pytest
+
+from app.ai.provider_manager import AIProviderManager
+from app.ai.extraction.pipeline import run_extraction
+from conftest import GATE_PDF
+from fake_llm import ScriptedProvider
+
+pytestmark = pytest.mark.skipif(not GATE_PDF.exists(), reason="GATE sample PDF missing")
+
+
+@pytest.fixture(scope="module")
+def result():
+    provider = ScriptedProvider()
+    r = run_extraction(GATE_PDF, exam_name_hint="GATE", manager=AIProviderManager(providers=[provider]))
+    r._provider = provider
+    return r
+
+
+def test_three_small_calls_not_fourteen_huge_ones(result):
+    assert sorted(result._provider.calls) == ["dates", "eligibility", "identity"]
+    total = sum(t["context_tokens"] for t in result.pipeline["topics"].values())
+    assert total < 15000         # the old pipeline sent ~100K tokens
+
+
+def test_exam_information(result):
+    info = result.extraction.exam_information
+    assert info.exam_name == "GATE 2027"
+    assert info.conducting_body == "IIT Madras"
+    assert info.release_date == "2026-08-27"
+    assert info.application_start_date is None            # "To be Announced"
+    assert info.application_end_date == "2026-09-27"      # not the struck-out 09-21
+    assert [(d.start_date, d.end_date) for d in info.exam_dates] == [
+        ("2027-02-06", "2027-02-07"), ("2027-02-13", "2027-02-14"), ("2027-02-20", "2027-02-21")]
+
+
+def test_superseded_dates_reported(result):
+    assert any(i.code == "superseded-ignored" for i in result.issues)
+
+
+def test_rules_and_no_blocking_issues(result):
+    groups = result.extraction.eligibility_rules.rule_groups
+    assert groups
+    text = result.model_dump_json()
+    assert "Educational Qualification" in text and "Bachelor's" in text
+    assert not result.blocking_issues, [i.message for i in result.blocking_issues]
+
+
+def test_every_field_has_verified_evidence(result):
+    verified = [e for e in result.evidence if e.verified]
+    assert len(verified) >= 6 and all(e.page_numbers for e in verified)
+
+
+=== FILE: tests\backend\test_pipeline_robustness.py ===
+import json
+from datetime import date
+
+import pytest
+
+from app.ai.extraction.parsing import parse_text_pages
+from app.ai.extraction.pipeline import run_extraction, ExtractionError
+from app.ai.provider_manager import AIProviderManager
+from app.ai.token_budget import TokenBucket, BudgetExceededError
+from fake_llm import ScriptedProvider, fact, passage_id, EMPTY
+
+DOC = parse_text_pages([
+    "Staff Selection Notification 2026\nIssued by Example Recruitment Board\nNotification date: 1 June 2026",
+    "Important Dates\nOnline applications open on 10 June 2026\nLast date to apply: 30 June 2026\n"
+    "Written examination on 15 and 16 August 2026",
+    "Eligibility Criteria\nNationality: Candidates must be citizens of India.\n"
+    "Age limit: 18 to 27 years as on 1 January 2026.\n"
+    "Qualification: A Bachelor's degree from a recognised university with at least 60% marks.",
+])
+
+
+def script(overrides=None):
+    def fn(task, c):
+        if task == "identity":
+            out = {"exam_name": fact(c, "Staff Selection 2026", "Staff Selection Notification 2026"),
+                   "conducting_body": fact(c, "Example Recruitment Board", "Example Recruitment Board"),
+                   "release_date": fact(c, "2026-06-01", "1 June 2026")}
+        elif task == "dates":
+            out = {"application_start_date": fact(c, "2026-06-10", "10 June 2026"),
+                   "application_end_date": fact(c, "2026-06-30", "30 June 2026"),
+                   "late_fee_end_date": EMPTY,
+                   "exam_dates": [{"label": None, "start_date": "2026-08-15", "end_date": "2026-08-16",
+                                   "quote": "15 and 16 August 2026", "passage": passage_id(c, "15 and 16 August")}]}
+        else:
+            out = {"has_no_age_limit": False,
+                   "age_limits": [
+                       {"kind": "minimum", "years": 18, "applies_to": "all candidates", "as_on_date": "2026-01-01",
+                        "quote": "18 to 27 years as on 1 January 2026", "passage": passage_id(c, "18 to 27")},
+                       {"kind": "maximum", "years": 27, "applies_to": "all candidates", "as_on_date": "2026-01-01",
+                        "quote": "18 to 27 years as on 1 January 2026", "passage": passage_id(c, "18 to 27")}],
+                   "qualifications": [{"level": "Bachelor's", "field": None, "quote": "A Bachelor's degree",
+                                       "passage": passage_id(c, "Bachelor's degree")}],
+                   "minimum_percentage": 60.0, "minimum_cgpa": None,
+                   "score_quote": "at least 60% marks", "score_passage": passage_id(c, "60% marks"),
+                   "nationalities": ["India"], "nationality_quote": "citizens of India",
+                   "nationality_passage": passage_id(c, "citizens of India"),
+                   "work_experience": EMPTY, "other_requirements": []}
+        if overrides:
+            out = overrides(task, out, c) or out
+        return out
+    return fn
+
+
+def run(overrides=None, providers=None):
+    p = providers or [ScriptedProvider(script(overrides))]
+    return run_extraction(DOC, manager=AIProviderManager(providers=p))
+
+
+def rules_of(r):
+    def walk(g):
+        for x in g.rules:
+            yield (x.attribute, x.operator, x.value)
+        for c in g.child_groups:
+            yield from walk(c)
+    return {x for g in r.extraction.eligibility_rules.rule_groups for x in walk(g)}
+
+
+def test_age_limit_becomes_date_of_birth_rules_in_python():
+    rules = rules_of(run())
+    # 18..27 as on 2026-01-01  =>  born on/before 2008-01-01 and on/after 1998-01-02
+    assert ("Date of Birth", "<=", "2008-01-01") in rules
+    assert ("Date of Birth", ">=", "1998-01-02") in rules
+    assert ("Percentage", ">=", "60") in rules or ("Percentage", ">=", "60.0") in rules
+    assert ("Nationality", "=", "India") in rules
+    assert ("Educational Qualification", "=", "Bachelor's") in rules
+
+
+def test_hallucinated_date_is_dropped_not_stored():
+    def bad(task, out, c):
+        if task == "dates":
+            out["application_end_date"] = {"value": "2026-07-31", "quote": "31 July 2026", "passage": None}
+            return out
+    r = run(bad)
+    assert r.extraction.exam_information.application_end_date is None
+    assert any(i.code == "date-not-in-document" for i in r.issues)
+
+
+def test_age_without_reference_date_creates_no_guessed_rule():
+    def no_ref(task, out, c):
+        if task == "eligibility":
+            for a in out["age_limits"]:
+                a["as_on_date"] = None
+            return out
+    r = run(no_ref)
+    assert not [x for x in rules_of(r) if x[0] == "Date of Birth"]
+    assert any("reference date" in i.message.lower() or "as on" in i.message.lower() for i in r.issues)
+
+
+def test_unsupported_output_falls_back_and_retries():
+    calls = {"n": 0}
+
+    def sometimes_garbage(task, c):
+        calls["n"] += 1
+        return "sorry, here you go: {not json" if calls["n"] == 1 else script()(task, c)
+
+    r = run(providers=[ScriptedProvider(sometimes_garbage)])
+    assert r.extraction.exam_information.exam_name
+    assert any(c.get("corrective_retry") for c in r.pipeline["calls"])
+
+
+def test_markdown_fenced_json_is_accepted():
+    p = ScriptedProvider(lambda t, c: "```json\n" + json.dumps(script()(t, c)) + "\n```")
+    assert run(providers=[p]).extraction.exam_information.exam_name == "Staff Selection 2026"
+
+
+def test_token_budget_routes_to_next_provider(monkeypatch):
+    from app.ai import token_budget as tb
+
+    class Limited(ScriptedProvider):
+        name = "groq"
+
+    monkeypatch.setattr(tb, "_limiters", {"groq": TokenBucket(600, safety=1.0, name="groq")})
+    monkeypatch.setattr(tb, "_PROVIDER_TPM", {"groq": ("X", 600)})
+    limited, backup = Limited(script()), ScriptedProvider(script())
+    r = run(providers=[limited, backup])
+    assert limited.calls == []                 # request never fit the bucket
+    assert backup.calls                        # so it was routed on, no 429 storm
+    assert r.extraction.exam_information.exam_name
+
+
+def test_all_providers_failing_raises_cleanly():
+    class Broken(ScriptedProvider):
+        def generate(self, **kw):
+            from app.ai.providers.base import AIProviderUnavailableError
+            raise AIProviderUnavailableError("down")
+    with pytest.raises(ExtractionError):
+        run(providers=[Broken()])
+
+
+=== FILE: tests\backend\test_rule_evaluator.py ===
+from datetime import date
+
+import pytest
+
+from app.services.rule_evaluator import evaluate_rule
+
+
+@pytest.mark.parametrize("student,rule", [
+    ("Indian", "India"), ("india", "India"), (" INDIA ", "India"),
+    ("Bachelors", "Bachelor's"), ("Bachelor's degree", "Bachelor's"),
+    ("Master's", "Masters"), ("12th / Senior Secondary", "12th / Senior Secondary"),
+])
+def test_text_equality_is_forgiving(student, rule):
+    assert evaluate_rule(student, "=", rule)
+    assert not evaluate_rule(student, "!=", rule)
+
+
+def test_different_values_still_differ():
+    assert not evaluate_rule("Nepali", "=", "India")
+    assert not evaluate_rule("Master's", "=", "Bachelor's")
+    assert evaluate_rule("Master's", "!=", "Bachelor's")
+
+
+def test_numbers_and_dates_unchanged():
+    assert evaluate_rule(8.5, ">=", 7.0)
+    assert not evaluate_rule(6.0, ">=", 7.0)
+    assert evaluate_rule(date(2000, 1, 1), ">=", date(1995, 1, 1))
+    assert evaluate_rule(60.0, "=", 60.0)
+
+
+=== FILE: tests\backend\test_units.py ===
+from datetime import date
+
+import pytest
+
+from app.ai.aggregated_extraction_result import ExtractionIssue
+from app.ai.extraction import compiler
+from app.ai.extraction.dates import find_dates
+from app.ai.extraction.facts import AgeLimit, DatesDraft, EligibilityDraft, Fact, QualificationFact
+from app.ai.extraction.grounding import Grounder, locate_quote
+from app.ai.extraction.llm import parse_model_json
+from app.ai.extraction.structure import Passage
+from app.ai.provider_manager import AIProviderManager, AllAIProvidersFailedError
+from app.ai.providers.base import AIProvider, AIProviderRateLimitError
+from app.ai.token_budget import TokenBucket, BudgetExceededError, reset_limiters_for_tests, get_limiter
+from app.services.text_matching import canonical_text, texts_equal
+
+
+def grounder(dates=()):
+    return Grounder(passages={}, doc_dates=set(dates))
+
+
+# ---------------------------------------------------------------- dates
+def test_date_forms():
+    got = {m.value for m in find_dates("February 6 & 7, 2027 | 6th-9th March 2027 | Sep 22 – Sep 30, 2026 | 01/02/2027")}
+    assert {date(2027, 2, 6), date(2027, 2, 7), date(2027, 3, 6), date(2027, 3, 9),
+            date(2026, 9, 22), date(2026, 9, 30), date(2027, 2, 1)} <= got
+
+
+def test_invalid_dates_ignored():
+    assert find_dates("February 30, 2027") == []
+
+
+# ------------------------------------------------- age -> date of birth
+@pytest.mark.parametrize("kind,years,ref,op,expected", [
+    ("maximum", 30, "2026-08-01", ">=", "1995-08-02"),   # aged <=30 on 1 Aug 2026 => born after 1 Aug 1995
+    ("minimum", 18, "2026-08-01", "<=", "2008-08-01"),
+    ("maximum", 25, "2028-02-29", ">=", "2002-03-01"),   # leap-day reference
+])
+def test_age_becomes_dob_rule(kind, years, ref, op, expected):
+    g = grounder([date.fromisoformat(ref)])
+    draft = EligibilityDraft(
+        age_limits=[AgeLimit(kind=kind, years=years, as_on_date=ref, quote=None, passage=None)],
+        work_experience=Fact(),
+    )
+    _, rules = compiler.compile_eligibility(draft, g, "")
+    rule = rules.rule_groups[0].rules[0]
+    assert (rule.attribute, rule.operator, rule.value) == ("Date of Birth", op, expected)
+
+
+def test_age_without_reference_date_creates_no_rule_but_warns():
+    g = grounder()
+    draft = EligibilityDraft(age_limits=[AgeLimit(kind="maximum", years=30)], work_experience=Fact())
+    info, rules = compiler.compile_eligibility(draft, g, "")
+    assert info.maximum_age == 30 and rules.rule_groups == []
+    assert any(i.code == "age-no-reference-date" for i in g.issues)
+
+
+def test_category_age_relaxation_is_not_a_general_rule():
+    g = grounder([date(2026, 8, 1)])
+    draft = EligibilityDraft(age_limits=[
+        AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01"),
+        AgeLimit(kind="maximum", years=33, applies_to="OBC", as_on_date="2026-08-01"),
+    ], work_experience=Fact())
+    info, rules = compiler.compile_eligibility(draft, g, "")
+    assert info.maximum_age == 30
+    assert any("OBC" in text for text in info.other_requirements)
+    assert not g.conflicts
+
+
+def test_conflicting_general_limits_are_reported_not_fatal():
+    g = grounder([date(2026, 8, 1)])
+    draft = EligibilityDraft(age_limits=[
+        AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01"),
+        AgeLimit(kind="maximum", years=32, as_on_date="2026-08-01"),
+    ], work_experience=Fact())
+    compiler.compile_eligibility(draft, g, "")
+    assert len(g.conflicts) == 1 and len(g.conflicts[0].options) == 2
+
+
+def test_alternatives_become_or_group_and_nationality_is_canonical():
+    g = grounder()
+    draft = EligibilityDraft(
+        qualifications=[QualificationFact(level="Bachelor's"), QualificationFact(level="Master's")],
+        nationalities=["Indian", "Nepali", "India"],
+        minimum_percentage=55.0,
+        work_experience=Fact(),
+    )
+    info, rules = compiler.compile_eligibility(draft, g, "")
+    top = rules.rule_groups[0]
+    assert top.logical_operator == "AND"
+    assert [(r.attribute, r.operator, r.value) for r in top.rules] == [("Percentage", ">=", "55")]
+    assert [r.value for r in top.child_groups[0].rules] == ["Bachelor's", "Master's"]
+    assert [r.value for r in top.child_groups[1].rules] == ["India", "Nepal"]
+
+
+def test_output_passes_the_existing_approval_gate():
+    from app.ai.complete_extraction_normalizer import normalize_complete_extraction
+    from app.ai.complete_extraction_validation import validate_complete_extraction
+    from app.ai.exam_schemas import ExamInformation
+    from app.ai.extraction_schemas import CompleteExtractionData
+    g = grounder([date(2026, 8, 1)])
+    draft = EligibilityDraft(
+        age_limits=[AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01")],
+        qualifications=[QualificationFact(level="Bachelor's")], nationalities=["India"], work_experience=Fact())
+    info, rules = compiler.compile_eligibility(draft, g, "")
+    data = CompleteExtractionData(
+        exam_information=ExamInformation(exam_name="X", conducting_body="Y", eligibility=info),
+        eligibility_rules=rules)
+    data = normalize_complete_extraction(data)
+    assert validate_complete_extraction(data) == []
+
+
+# ------------------------------------------------------------ grounding
+def test_quote_location_exact_and_fuzzy():
+    p = Passage("P1", 0, 3, 3, "Dates", "Application Portal closing | Sunday, September 27, 2026", tokens=10)
+    assert locate_quote("Sunday, September 27, 2026", "P1", {"P1": p}).exact
+    assert locate_quote("Application Portal closing Sunday September 27 2026", "P1", {"P1": p}) is not None
+    assert locate_quote("Applications close on 5 November", "P1", {"P1": p}) is None
+
+
+def test_parse_model_json_tolerates_fences_and_thinking():
+    from app.ai.extraction.facts import Fact
+    assert parse_model_json('<think>hmm</think>```json\n{"value": "a"}\n```', Fact).value == "a"
+    assert parse_model_json('Sure! {"value": "b"} Done.', Fact).value == "b"
+    with pytest.raises(Exception):
+        parse_model_json("no json here", Fact)
+
+
+# ---------------------------------------------------- text matching
+def test_tolerant_text_matching():
+    assert texts_equal("Indian", "India")
+    assert texts_equal("bachelors", "Bachelor's")
+    assert texts_equal("B.Tech.", "Bachelor's")
+    assert texts_equal("12th", "12th / Senior Secondary")
+    assert not texts_equal("Master's", "Bachelor's")
+    assert canonical_text("  Computer   Science ") == "computer science"
+
+
+# ------------------------------------------------- token budget + manager
+class Boom(AIProvider):
+    name = "groq"
+    def __init__(self, exc): self.exc, self.calls = exc, 0
+    def generate(self, **kw):
+        self.calls += 1
+        raise self.exc
+
+class Ok(AIProvider):
+    name = "openrouter"
+    def __init__(self): self.calls = 0
+    def generate(self, **kw):
+        self.calls += 1
+        return "{}"
+
+
+def test_bucket_queues_then_refuses_long_waits():
+    b = TokenBucket(600, safety=1.0, name="t")            # 10 tokens/s
+    assert b.acquire(500, max_wait=1) == 0
+    with pytest.raises(BudgetExceededError) as e:
+        b.acquire(400, max_wait=1)
+    assert e.value.wait_seconds > 1
+    with pytest.raises(BudgetExceededError):
+        b.acquire(10_000, max_wait=99)                    # can never fit
+
+
+def test_manager_routes_to_next_provider_instead_of_hitting_429(monkeypatch):
+    monkeypatch.setenv("NEXSTEP_GROQ_TPM", "1000")        # tiny budget
+    reset_limiters_for_tests()
+    groq, other = Boom(RuntimeError("must not be called")), Ok()
+    m = AIProviderManager(providers=[groq, other])
+    out = m.generate(messages=[{"role": "user", "content": "x" * 6000}], max_tokens=500)
+    assert out == "{}" and groq.calls == 0 and other.calls == 1
+    assert "Token budget" in m.last_attempts[0].error
+
+
+def test_real_429_penalizes_bucket_and_falls_through(monkeypatch):
+    monkeypatch.setenv("NEXSTEP_GROQ_TPM", "8000")
+    reset_limiters_for_tests()
+    groq, other = Boom(AIProviderRateLimitError("429", retry_after=20)), Ok()
+    m = AIProviderManager(providers=[groq, other])
+    assert m.generate(messages=[{"role": "user", "content": "hi"}], max_tokens=100) == "{}"
+    assert get_limiter("groq")._tokens < 0                # bucket drained by Retry-After
+
+
+def test_validation_failure_is_flagged_for_corrective_retry(monkeypatch):
+    monkeypatch.setenv("NEXSTEP_GROQ_TPM", "0")
+    reset_limiters_for_tests()
+    m = AIProviderManager(providers=[Ok()])
+    with pytest.raises(AllAIProvidersFailedError) as e:
+        m.generate(messages=[{"role": "user", "content": "hi"}], validator=lambda s: 1 / 0)
+    assert e.value.validation_failed
+
+
+=== FILE: tests\seed_admin.py ===
+from app.database.session import SessionLocal
+from app.models.admin import Admin
+from app.auth.security import hash_password
+
+db = SessionLocal()
+db.add(Admin(name="Admin Test", email="admin@test.com",
+             password_hash=hash_password("adminpass123"), account_status="active"))
+db.commit()
+print("admin created")

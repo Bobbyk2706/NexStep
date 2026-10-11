@@ -1,0 +1,1707 @@
+
+=== FILE: frontend\src\pages\Assistant.jsx ===
+import { useState } from "react";
+import EmptyState from "../components/chat/EmptyState";
+import MessageBubble from "../components/chat/MessageBubble";
+import MessageInput from "../components/chat/MessageInput";
+import { askAssistant, toChatMessage } from "../api/assistant";
+
+const SUGGESTED_QUESTIONS = [
+  "Am I eligible for GATE 2027?",
+  "When does the CAT 2026 application close?",
+  "How does NexStep decide what I'm eligible for?",
+  "What happens if my CGPA changes?",
+  "Am I eligible for UPSC Civil Services?",
+  "How will I know about new deadlines?",
+];
+
+let msgCounter = 0;
+const nextId = () => `m${++msgCounter}`;
+
+export default function Assistant() {
+  const [messages, setMessages] = useState([]);
+  const [sending, setSending] = useState(false);
+
+  async function resolveAnswer(query, thinkingId, baseMessages) {
+    const history = baseMessages.filter((m) => m.id !== thinkingId);
+    const result = await askAssistant(query, history);
+    const resolved = toChatMessage(thinkingId, result);
+
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === thinkingId ? resolved : message
+      )
+    );
+    setSending(false);
+  }
+
+  function handleSend(text) {
+    if (!text?.trim() || sending) return;
+
+    setSending(true);
+
+    const userMsg = { id: nextId(), role: "user", content: text.trim() };
+    const thinkingId = nextId();
+    const withThinking = [
+      ...messages,
+      userMsg,
+      { id: thinkingId, role: "assistant", status: "thinking" },
+    ];
+
+    setMessages(withThinking);
+    resolveAnswer(text.trim(), thinkingId, withThinking);
+  }
+
+  function handleRetry() {
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser || sending) return;
+
+    setSending(true);
+    const thinkingId = nextId();
+    const withThinking = [
+      ...messages,
+      { id: thinkingId, role: "assistant", status: "thinking" },
+    ];
+
+    setMessages(withThinking);
+    resolveAnswer(lastUser.content, thinkingId, withThinking);
+  }
+
+  function handleRegenerate(messageId) {
+    const idx = messages.findIndex((m) => m.id === messageId);
+    const lastUser = [...messages.slice(0, idx)]
+      .reverse()
+      .find((m) => m.role === "user");
+
+    if (!lastUser || sending) return;
+
+    setSending(true);
+    const thinkingId = nextId();
+    const withThinking = messages.map((message) =>
+      message.id === messageId
+        ? { id: thinkingId, role: "assistant", status: "thinking" }
+        : message
+    );
+
+    setMessages(withThinking);
+    resolveAnswer(lastUser.content, thinkingId, withThinking);
+  }
+
+  return (
+    <div className="flex min-h-[calc(100vh-140px)] flex-col md:min-h-[calc(100vh-100px)]">
+      {messages.length === 0 ? (
+        <EmptyState questions={SUGGESTED_QUESTIONS} onSelect={handleSend} />
+      ) : (
+        <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 py-6">
+          {messages.map((message) => (
+            <MessageBubble
+              key={message.id}
+              message={message}
+              onRetry={handleRetry}
+              onRegenerate={handleRegenerate}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="sticky bottom-0 mx-auto w-full max-w-2xl bg-paper/95 pb-2 pt-4 backdrop-blur-sm">
+        <MessageInput onSend={handleSend} disabled={sending} />
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\Dashboard.jsx ===
+import { Link } from "react-router-dom";
+import { ListChecks, Search, ArrowRight, CalendarClock, Sparkles } from "lucide-react";
+import Card from "../components/ui/Card";
+import EligibilityPill from "../components/ui/EligibilityPill";
+import { useAuth } from "../context/AuthContext";
+import { useProfile } from "../context/ProfileContext";
+import { useNotifications } from "../context/NotificationsContext";
+import { formatDate, daysUntil } from "../utils/date";
+
+function StatCard({ label, value, accent }) {
+  return (
+    <Card className="flex flex-col gap-1">
+      <p className="text-sm text-slate-500">{label}</p>
+      <p className={`font-display text-3xl font-semibold ${accent || "text-ink"}`}>{value}</p>
+    </Card>
+  );
+}
+
+export default function Dashboard() {
+  const { user } = useAuth();
+  const { exams, eligibleExams, loading } = useProfile();
+  const { notifications } = useNotifications();
+
+  const upcoming = eligibleExams
+    .filter((e) => daysUntil(e.applicationDeadline) !== null)
+    .sort((a, b) => new Date(a.applicationDeadline) - new Date(b.applicationDeadline))
+    .slice(0, 4);
+
+  const recentNotifications = notifications.slice(0, 4);
+
+  return (
+    <div className="flex flex-col gap-8">
+      <div>
+        <p className="text-sm text-slate-500">Welcome back</p>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          {user?.name?.split(" ")[0] || "Student"}
+        </h1>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <StatCard label="Total exams tracked" value={loading ? "—" : exams.length} />
+        <StatCard label="You're eligible for" value={loading ? "—" : eligibleExams.length} accent="text-signal-600" />
+        <StatCard
+          label="Closing within 14 days"
+          value={loading ? "—" : eligibleExams.filter((e) => { const d = daysUntil(e.applicationDeadline); return d !== null && d >= 0 && d <= 14; }).length}
+          accent="text-amber-600"
+        />
+        <StatCard label="Unread notifications" value={notifications.filter((n) => !n.read).length} />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="font-display text-base font-semibold text-ink">Upcoming deadlines & exam dates</h2>
+            <Link to="/upcoming" className="flex items-center gap-1 text-sm font-medium text-gold hover:underline">
+              View all <ArrowRight size={14} />
+            </Link>
+          </div>
+          <div className="flex flex-col divide-y divide-slate-100">
+            {upcoming.length === 0 && !loading && (
+              <p className="py-4 text-sm text-slate-400">No upcoming deadlines among your eligible exams yet.</p>
+            )}
+            {upcoming.map((exam) => (
+              <Link
+                key={exam.id}
+                to={`/exams/${exam.id}`}
+                className="flex items-center justify-between gap-4 py-3.5 first:pt-0 last:pb-0 hover:opacity-80"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-ink">{exam.name}</p>
+                  <p className="truncate text-xs text-slate-500">
+                    Applications close {formatDate(exam.applicationDeadline)} · Exam on {formatDate(exam.examDate)}
+                  </p>
+                </div>
+                <EligibilityPill eligible={exam.eligible} deadline={exam.applicationDeadline} size="sm" />
+              </Link>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="font-display text-base font-semibold text-ink">Recent notifications</h2>
+            <Link to="/notifications" className="flex items-center gap-1 text-sm font-medium text-gold hover:underline">
+              View all <ArrowRight size={14} />
+            </Link>
+          </div>
+          <div className="flex flex-col divide-y divide-slate-100">
+            {recentNotifications.length === 0 && <p className="py-4 text-sm text-slate-400">You're all caught up.</p>}
+            {recentNotifications.map((n) => (
+              <div key={n.id} className="flex items-start gap-2.5 py-3 first:pt-0 last:pb-0">
+                <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${n.read ? "bg-slate-200" : "bg-indigo-600"}`} />
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-ink">{n.title}</p>
+                  <p className="truncate text-xs text-slate-500">{n.message}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Link to="/assistant" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-surface p-5 shadow-card transition hover:border-indigo-200">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-700 text-white">
+            <Sparkles size={18} />
+          </div>
+          <div>
+            <p className="font-display font-semibold text-ink">Ask the assistant</p>
+            <p className="text-sm text-slate-500">Questions about exams, answered from your profile.</p>
+          </div>
+        </Link>
+        <Link to="/eligibility" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-surface p-5 shadow-card transition hover:border-indigo-200">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-700 text-white">
+            <ListChecks size={18} />
+          </div>
+          <div>
+            <p className="font-display font-semibold text-ink">Eligibility results</p>
+            <p className="text-sm text-slate-500">Every exam, checked against your profile.</p>
+          </div>
+        </Link>
+        <Link to="/search" className="group flex items-center gap-4 rounded-2xl border border-slate-200/70 bg-surface p-5 shadow-card transition hover:border-indigo-200">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-700 text-white">
+            <Search size={18} />
+          </div>
+          <div>
+            <p className="font-display font-semibold text-ink">Browse all exams</p>
+            <p className="text-sm text-slate-500">Search by name, organization, or category.</p>
+          </div>
+        </Link>
+      </div>
+
+      {eligibleExams.length === 0 && !loading && (
+        <Card className="flex items-center gap-4 bg-indigo-50/50">
+          <CalendarClock size={20} className="shrink-0 text-gold" />
+          <p className="text-sm text-slate-700">
+            Nothing's matched yet — that updates automatically as exams are added or your profile changes.
+          </p>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\Eligibility.jsx ===
+import { useState } from "react";
+import { Link } from "react-router-dom";
+import Card from "../components/ui/Card";
+import EligibilityPill from "../components/ui/EligibilityPill";
+import { useProfile } from "../context/ProfileContext";
+import { formatDate } from "../utils/date";
+
+const FILTERS = ["All", "Eligible", "Not eligible"];
+
+export default function Eligibility() {
+  const { exams, loading } = useProfile();
+  const [filter, setFilter] = useState("Eligible");
+
+  const filtered = exams.filter((e) => {
+    if (filter === "Eligible") return e.eligible;
+    if (filter === "Not eligible") return !e.eligible;
+    return true;
+  });
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          Your eligibility results
+        </h1>
+        <p className="mt-1.5 text-slate-600">
+          Checked automatically against your profile — no need to pick an exam first.
+        </p>
+      </div>
+
+      <div className="flex gap-2">
+        {FILTERS.map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={`rounded-xl px-3.5 py-1.5 text-sm font-medium transition ${
+              filter === f ? "bg-indigo-700 text-white" : "bg-surface text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
+            }`}
+          >
+            {f}
+          </button>
+        ))}
+      </div>
+
+      {loading && <p className="text-sm text-slate-400">Checking your profile against every exam...</p>}
+
+      <div className="flex flex-col gap-3">
+        {!loading && filtered.length === 0 && (
+          <Card>
+            <p className="text-sm text-slate-500">No exams in this view yet.</p>
+          </Card>
+        )}
+        {filtered.map((exam) => (
+          <Card key={exam.id} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5">
+                <h3 className="font-display font-semibold text-ink">{exam.name}</h3>
+                <EligibilityPill eligible={exam.eligible} deadline={exam.applicationDeadline} size="sm" />
+              </div>
+              <p className="mt-1 text-sm text-slate-500">{exam.organization}</p>
+              <p className="mt-1.5 text-xs text-slate-400">{exam.reason}</p>
+              <p className="mt-2 font-mono text-xs text-slate-500">
+                Apply by {formatDate(exam.applicationDeadline)} · Exam on {formatDate(exam.examDate)}
+              </p>
+            </div>
+            <Link
+              to={`/exams/${exam.id}`}
+              className="shrink-0 rounded-xl px-4 py-2 text-center text-sm font-medium text-gold ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
+            >
+              View details
+            </Link>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\ExamDetails.jsx ===
+import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { ArrowLeft, ExternalLink, CheckCircle2 } from "lucide-react";
+import Card from "../components/ui/Card";
+import EligibilityPill from "../components/ui/EligibilityPill";
+import * as examsApi from "../api/exams";
+import { formatDate } from "../utils/date";
+
+function firstExamDate(notification) {
+  const dates = notification?.exam_dates || [];
+  if (dates.length === 0) return null;
+
+  return [...dates].sort(
+    (a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime()
+  )[0]?.start_date || null;
+}
+
+export default function ExamDetails() {
+  const { id } = useParams();
+  const [exam, setExam] = useState(undefined);
+  const [eligibility, setEligibility] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setExam(undefined);
+    setEligibility(null);
+    setError("");
+
+    Promise.allSettled([
+      examsApi.getExamById(id),
+      examsApi.evaluateEligibility(id),
+    ]).then(([examResult, eligibilityResult]) => {
+      if (!active) return;
+
+      if (examResult.status === "fulfilled") {
+        setExam(examResult.value);
+      } else {
+        setExam(null);
+        setError(examResult.reason?.message || "Could not load this exam.");
+      }
+
+      if (eligibilityResult.status === "fulfilled") {
+        setEligibility(eligibilityResult.value);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [id]);
+
+  if (exam === undefined) {
+    return <p className="text-sm text-slate-400">Loading exam details...</p>;
+  }
+
+  if (exam === null) {
+    return (
+      <Card>
+        <p className="text-sm text-slate-500">We couldn't find that exam.</p>
+        {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
+        <Link to="/eligibility" className="mt-3 inline-block text-sm font-medium text-gold hover:underline">
+          Back to eligibility results
+        </Link>
+      </Card>
+    );
+  }
+
+  const notification = exam.latest_approved_notification;
+  const eligible = eligibility?.eligibility_status === "ELIGIBLE";
+  const reason = eligibility?.reason || "No eligibility result is available.";
+  const examDate = firstExamDate(notification);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <Link to="/eligibility" className="flex w-fit items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-ink">
+        <ArrowLeft size={15} /> Back to eligibility results
+      </Link>
+
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">{exam.name}</h1>
+          <p className="mt-1 text-slate-500">{exam.conducting_body?.name || "—"} · {exam.type || "Exam"}</p>
+        </div>
+        <EligibilityPill
+          eligible={eligible}
+          deadline={notification?.application_end_date}
+        />
+      </div>
+
+      <Card className="flex items-start gap-3">
+        <CheckCircle2 size={18} className={`mt-0.5 shrink-0 ${eligible ? "text-signal-500" : "text-slate-400"}`} />
+        <div>
+          <p className="font-medium text-ink">{eligible ? "You're eligible" : "You're not eligible — yet"}</p>
+          <p className="mt-1 whitespace-pre-line text-sm text-slate-500">{reason}</p>
+        </div>
+      </Card>
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Card>
+          <p className="text-xs uppercase tracking-wide text-slate-400">Application opens</p>
+          <p className="mt-1.5 font-mono text-sm text-ink">{formatDate(notification?.application_start_date)}</p>
+        </Card>
+        <Card>
+          <p className="text-xs uppercase tracking-wide text-slate-400">Application deadline</p>
+          <p className="mt-1.5 font-mono text-sm text-ink">{formatDate(notification?.application_end_date)}</p>
+        </Card>
+        <Card>
+          <p className="text-xs uppercase tracking-wide text-slate-400">Exam date</p>
+          <p className="mt-1.5 font-mono text-sm text-ink">{formatDate(examDate)}</p>
+        </Card>
+      </div>
+
+      {exam.description && (
+        <Card>
+          <h2 className="font-display text-base font-semibold text-ink">About this exam</h2>
+          <p className="mt-3 text-sm leading-6 text-slate-600">{exam.description}</p>
+        </Card>
+      )}
+
+      {notification?.ai_summary && (
+        <Card>
+          <h2 className="font-display text-base font-semibold text-ink">Latest official notification</h2>
+          <p className="mt-1 text-sm font-medium text-ink">{notification.title}</p>
+          <p className="mt-3 text-sm leading-6 text-slate-600">{notification.ai_summary}</p>
+        </Card>
+      )}
+
+      {notification?.exam_dates?.length > 0 && (
+        <Card>
+          <h2 className="font-display text-base font-semibold text-ink">All examination dates</h2>
+          <ul className="mt-3 flex flex-col gap-2">
+            {notification.exam_dates.map((dateRange) => (
+              <li key={`${dateRange.exam_date_id}-${dateRange.start_date}`} className="text-sm text-slate-600">
+                {formatDate(dateRange.start_date)}
+                {dateRange.end_date && dateRange.end_date !== dateRange.start_date
+                  ? ` – ${formatDate(dateRange.end_date)}`
+                  : ""}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      {(notification?.official_url || exam.off_exam_page) && (
+        <a
+          href={notification?.official_url || exam.off_exam_page}
+          target="_blank"
+          rel="noreferrer"
+          className="flex w-fit items-center gap-2 rounded-xl bg-indigo-700 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-600"
+        >
+          Visit official website <ExternalLink size={15} />
+        </a>
+      )}
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\Landing.jsx ===
+import { Link } from "react-router-dom";
+import { ListChecks, BellRing, CalendarClock, UserRound, ArrowRight } from "lucide-react";
+import PublicNavbar from "../components/layout/PublicNavbar";
+
+const STEPS = [
+  { n: "01", title: "Sign up", desc: "Create your NexStep account in under a minute.", lift: "md:translate-y-0" },
+  { n: "02", title: "Build your profile", desc: "Academics, qualifications, and work experience — once.", lift: "md:-translate-y-6" },
+  { n: "03", title: "Get matched", desc: "NexStep checks every exam's rules against your profile.", lift: "md:-translate-y-12" },
+  { n: "04", title: "Apply on time", desc: "See deadlines and exam dates before they sneak up on you.", lift: "md:-translate-y-[4.5rem]" },
+];
+
+const FEATURES = [
+  {
+    icon: ListChecks,
+    title: "No searching required",
+    desc: "NexStep checks your profile against every exam's eligibility rules automatically — you never pick an exam first.",
+  },
+  {
+    icon: CalendarClock,
+    title: "Deadlines that find you",
+    desc: "Application windows and exam dates for everything you qualify for, laid out in one timeline.",
+  },
+  {
+    icon: BellRing,
+    title: "Told the moment it matters",
+    desc: "Newly eligible for something? A deadline closing? You'll know without checking ten different websites.",
+  },
+  {
+    icon: UserRound,
+    title: "One profile, every exam",
+    desc: "Enter your academic details once. NexStep re-checks them against new exams as they're added.",
+  },
+];
+
+export default function Landing() {
+  return (
+    <div className="min-h-screen bg-paper">
+      <PublicNavbar />
+
+      {/* Hero */}
+      <section className="mx-auto max-w-6xl px-6 pb-20 pt-16 md:pb-28 md:pt-24">
+        <div className="grid items-center gap-16 md:grid-cols-2">
+          <div>
+            <p className="mb-4 font-mono text-xs uppercase tracking-[0.2em] text-gold">
+              For students choosing what's next
+            </p>
+            <h1 className="font-display text-4xl font-semibold leading-[1.08] tracking-tight text-ink md:text-[3.4rem]">
+              Stop searching exams.
+              <br />
+              Let them find <span className="text-gold">you.</span>
+            </h1>
+            <p className="mt-6 max-w-md text-lg leading-relaxed text-slate-600">
+              NexStep reads your academic profile and automatically shows every exam
+              you're eligible for — GATE, CAT, GRE, UPSC and more — with deadlines
+              tracked from day one.
+            </p>
+            <div className="mt-9 flex flex-wrap items-center gap-4">
+              <Link
+                to="/signup"
+                className="group inline-flex items-center gap-2 rounded-xl bg-indigo-700 px-5 py-3 text-[15px] font-medium text-white transition hover:bg-indigo-600"
+              >
+                Get started
+                <ArrowRight size={16} className="transition group-hover:translate-x-0.5" />
+              </Link>
+              <Link
+                to="/login"
+                className="inline-flex items-center gap-2 rounded-xl px-5 py-3 text-[15px] font-medium text-slate-700 ring-1 ring-inset ring-slate-200 transition hover:bg-surface"
+              >
+                I already have an account
+              </Link>
+            </div>
+          </div>
+
+          {/* Signature: ascending step cards, a literal "next step" */}
+          <div id="how-it-works" className="relative mx-auto flex w-full max-w-sm flex-col gap-4 md:flex-row md:items-end md:gap-3">
+            <div className="pointer-events-none absolute left-[10px] top-2 hidden h-[calc(100%-1rem)] w-px step-line md:block" />
+            {STEPS.map((step) => (
+              <div key={step.n} className={`relative flex-1 ${step.lift}`}>
+                <div className="rounded-2xl border border-slate-200/70 bg-surface p-4 shadow-card">
+                  <span className="font-mono text-xs text-gold">{step.n}</span>
+                  <h3 className="mt-1 font-display text-[15px] font-semibold text-ink">{step.title}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">{step.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section id="features" className="border-t border-slate-200/70 bg-slate-100">
+        <div className="mx-auto max-w-6xl px-6 py-20">
+          <h2 className="max-w-lg font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+            Introducing NexStep
+          </h2>
+          <p className="mt-3 max-w-xl text-slate-600">
+            One place that knows what you've studied, what you've scored, and what
+            that qualifies you for right now.
+          </p>
+          <div className="mt-12 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {FEATURES.map(({ icon: Icon, title, desc }) => (
+              <div key={title} className="rounded-2xl border border-slate-200/70 bg-paper p-5">
+                <div className="mb-4 flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-700 text-white">
+                  <Icon size={17} />
+                </div>
+                <h3 className="font-display text-[15px] font-semibold text-ink">{title}</h3>
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-500">{desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section className="mx-auto max-w-6xl px-6 py-20 text-center">
+        <h2 className="mx-auto max-w-xl font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          Your profile already qualifies you for something. Find out what.
+        </h2>
+        <Link
+          to="/signup"
+          className="mt-8 inline-flex items-center gap-2 rounded-xl bg-indigo-700 px-6 py-3 text-[15px] font-medium text-white transition hover:bg-indigo-600"
+        >
+          Create your NexStep account
+          <ArrowRight size={16} />
+        </Link>
+      </section>
+
+      <footer className="border-t border-slate-200/70 px-6 py-8 text-center text-xs text-slate-400">
+        NexStep — built for students figuring out what's next.
+      </footer>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\Login.jsx ===
+import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { GraduationCap, ShieldCheck } from "lucide-react";
+import PublicNavbar from "../components/layout/PublicNavbar";
+import { TextField } from "../components/ui/Field";
+import Button from "../components/ui/Button";
+import { useAuth } from "../context/AuthContext";
+import { useAdminAuth } from "../admin/context/AdminAuthContext";
+
+const ROLES = [
+  { key: "student", label: "Student", icon: GraduationCap },
+  { key: "admin", label: "Admin", icon: ShieldCheck },
+];
+
+const COPY = {
+  student: {
+    heading: "Welcome back",
+    subheading: "Log in to see what you're eligible for.",
+  },
+  admin: {
+    heading: "Admin sign in",
+    subheading: "Review extractions and manage exam data.",
+  },
+};
+
+// One login screen for both roles. The person picks Student or Admin, the
+// same email/password form submits to whichever auth context matches, and
+// each landing page/route guard already knows where to send them from there.
+// Student and admin sessions are stored under separate keys (see
+// api/client.js vs admin/api/adminAuth.js), so picking one here never signs
+// the person into the other.
+export default function Login() {
+  const { login: studentLogin } = useAuth();
+  const { login: adminLogin } = useAdminAuth();
+  const navigate = useNavigate();
+
+  const [role, setRole] = useState("student");
+  const [form, setForm] = useState({ email: "", password: "" });
+  const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  function validate() {
+    const next = {};
+    if (!/^\S+@\S+\.\S+$/.test(form.email)) next.email = "Enter a valid email address.";
+    if (form.password.length < 6) next.password = "Password must be at least 6 characters.";
+    setErrors(next);
+    return Object.keys(next).length === 0;
+  }
+
+  function switchRole(nextRole) {
+    if (nextRole === role) return;
+    setRole(nextRole);
+    setErrors({});
+    setFormError("");
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setFormError("");
+    if (!validate()) return;
+    setLoading(true);
+    try {
+      if (role === "admin") {
+        await adminLogin(form);
+        navigate("/admin/dashboard");
+      } else {
+        const res = await studentLogin(form);
+        navigate(res.hasProfile ? "/dashboard" : "/profile/setup");
+      }
+    } catch (err) {
+      setFormError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const copy = COPY[role];
+
+  return (
+    <div className="min-h-screen bg-paper">
+      <PublicNavbar />
+      <div className="mx-auto flex max-w-md flex-col px-6 py-16">
+        <div
+          role="tablist"
+          aria-label="Log in as"
+          className="mb-7 inline-flex w-fit gap-1 rounded-xl bg-white p-1 ring-1 ring-inset ring-slate-200"
+        >
+          {ROLES.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={role === key}
+              onClick={() => switchRole(key)}
+              className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium transition ${
+                role === key ? "bg-indigo-700 text-white" : "text-slate-500 hover:text-ink"
+              }`}
+            >
+              <Icon size={15} />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <h1 className="font-display text-3xl font-semibold tracking-tight text-ink">{copy.heading}</h1>
+        <p className="mt-2 text-slate-600">{copy.subheading}</p>
+
+        <form onSubmit={handleSubmit} noValidate className="mt-8 flex flex-col gap-5">
+          {formError && (
+            <p className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-amber-600 ring-1 ring-inset ring-amber-200">
+              {formError}
+            </p>
+          )}
+          <TextField
+            id="email"
+            label={role === "admin" ? "Email / Username" : "Email"}
+            type="email"
+            autoComplete="username"
+            required
+            value={form.email}
+            error={errors.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
+          />
+          <TextField
+            id="password"
+            label="Password"
+            type="password"
+            autoComplete="current-password"
+            required
+            value={form.password}
+            error={errors.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+          />
+          <Button type="submit" loading={loading} className="mt-2 w-full">
+            {role === "admin" ? "Log in to admin" : "Log in"}
+          </Button>
+        </form>
+
+        {role === "student" ? (
+          <p className="mt-8 text-center text-sm text-slate-500">
+            New to NexStep?{" "}
+            <Link to="/signup" className="font-medium text-gold hover:underline">
+              Create an account
+            </Link>
+          </p>
+        ) : (
+          <p className="mt-8 text-center text-sm text-slate-500">
+            Admin accounts are provisioned by your team, not self-service.
+          </p>
+        )}
+
+        <p className="mt-6 text-center text-xs text-slate-400">
+          Student and admin sessions are stored separately, so choosing one never affects the other.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\Notifications.jsx ===
+import { Link } from "react-router-dom";
+import { CalendarClock, BellRing, Sparkles, Info } from "lucide-react";
+import Card from "../components/ui/Card";
+import Button from "../components/ui/Button";
+import { useNotifications } from "../context/NotificationsContext";
+import { timeAgo } from "../utils/date";
+
+const TYPE_META = {
+  deadline: { icon: CalendarClock, color: "text-amber-600 bg-amber-50" },
+  exam: { icon: BellRing, color: "text-gold bg-indigo-50" },
+  "new-eligible": { icon: Sparkles, color: "text-signal-600 bg-signal-50" },
+  update: { icon: Info, color: "text-slate-500 bg-slate-50" },
+};
+
+export default function Notifications() {
+  const { notifications, markRead, markAllRead } = useNotifications();
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">Notifications</h1>
+          <p className="mt-1.5 text-slate-600">Deadlines, new matches, and updates to exams you're tracking.</p>
+        </div>
+        {notifications.some((n) => !n.read) && (
+          <Button variant="secondary" className="text-sm" onClick={markAllRead}>
+            Mark all as read
+          </Button>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {notifications.length === 0 && (
+          <Card>
+            <p className="text-sm text-slate-500">You're all caught up — nothing here yet.</p>
+          </Card>
+        )}
+        {notifications.map((n) => {
+          const meta = TYPE_META[n.type] || TYPE_META.update;
+          const Icon = meta.icon;
+          return (
+            <Card
+              key={n.id}
+              className={`flex items-start gap-4 ${!n.read ? "ring-1 ring-inset ring-indigo-100" : ""}`}
+            >
+              <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${meta.color}`}>
+                <Icon size={16} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="font-medium text-ink">{n.title}</p>
+                  <span className="shrink-0 text-xs text-slate-400">{timeAgo(n.timestamp)}</span>
+                </div>
+                <p className="mt-1 text-sm text-slate-500">{n.message}</p>
+                <div className="mt-2.5 flex items-center gap-4">
+                  {n.examId && (
+                    <Link to={`/exams/${n.examId}`} className="text-sm font-medium text-gold hover:underline">
+                      View exam
+                    </Link>
+                  )}
+                  {!n.read && (
+                    <button onClick={() => markRead(n.id)} className="text-sm font-medium text-slate-400 hover:text-ink">
+                      Mark as read
+                    </button>
+                  )}
+                </div>
+              </div>
+              {!n.read && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-indigo-600" />}
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\ProfileSetup.jsx ===
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Plus, Trash2, GraduationCap } from "lucide-react";
+import Logo from "../components/ui/Logo";
+import Card from "../components/ui/Card";
+import Button from "../components/ui/Button";
+import { TextField, SelectField } from "../components/ui/Field";
+import { useAuth } from "../context/AuthContext";
+import * as profileApi from "../api/profile";
+
+const YEAR_OPTIONS = ["1st Year", "2nd Year", "3rd Year", "4th Year", "Final Year", "Graduated"];
+const QUALIFICATION_LEVELS = ["10th", "12th / Senior Secondary", "Diploma", "Bachelor's", "Master's", "PhD", "Other"];
+
+const emptyQualification = () => ({ level: "12th / Senior Secondary", institution: "", field: "", yearCompleted: "", score: "" });
+const emptyWorkExperience = () => ({ company: "", role: "", duration: "" });
+const emptyPreviousQualification = () => ({ level: "Bachelor's", institution: "", field: "", yearCompleted: "", score: "" });
+
+export default function ProfileSetup() {
+  const navigate = useNavigate();
+  const { markProfileComplete, user } = useAuth();
+
+  // The name was collected at signup, so it is not asked for again.
+  const firstName = (user?.name || "").trim().split(/\s+/)[0];
+
+  const [form, setForm] = useState({
+    dob: "",
+    nationality: "",
+    state: "",
+    college: "",
+    branch: "",
+    yearOfStudy: "",
+    cgpa: "",
+    percentage: "",
+  });
+  const [qualifications, setQualifications] = useState([emptyQualification()]);
+  const [workExperience, setWorkExperience] = useState([]);
+  const [hasHigherQualification, setHasHigherQualification] = useState(false);
+  const [previousQualification, setPreviousQualification] = useState(emptyPreviousQualification());
+  const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    profileApi.getProfile().then((existing) => {
+      if (!existing) return;
+      setForm({
+        dob: existing.dob || "",
+        nationality: existing.nationality || "",
+        state: existing.state || "",
+        college: existing.college || "",
+        branch: existing.branch || "",
+        yearOfStudy: existing.yearOfStudy || "",
+        cgpa: existing.cgpa || "",
+        percentage: existing.percentage || "",
+      });
+      if (existing.qualifications?.length) setQualifications(existing.qualifications);
+      if (existing.workExperience?.length) setWorkExperience(existing.workExperience);
+      setHasHigherQualification(Boolean(existing.hasHigherQualification));
+      if (existing.previousQualification) setPreviousQualification(existing.previousQualification);
+    }).catch(() => {
+      // A brand-new account has nothing to load yet.
+    });
+  }, []);
+
+  function updateField(key, value) {
+    setForm((f) => ({ ...f, [key]: value }));
+  }
+
+  function updateQualification(index, key, value) {
+    setQualifications((rows) => rows.map((row, i) => (i === index ? { ...row, [key]: value } : row)));
+  }
+
+  function updateWorkExperience(index, key, value) {
+    setWorkExperience((rows) => rows.map((row, i) => (i === index ? { ...row, [key]: value } : row)));
+  }
+
+  // Only the personal details are required. Academic details are optional.
+  function validate() {
+    const next = {};
+    if (!form.dob) next.dob = "Required.";
+    if (!form.nationality.trim()) next.nationality = "Required.";
+    if (!form.state.trim()) next.state = "Required.";
+    setErrors(next);
+    return Object.keys(next).length === 0;
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setFormError("");
+    if (!validate()) return;
+    setSaving(true);
+    try {
+      await profileApi.saveProfile({
+        ...form,
+        qualifications,
+        workExperience,
+        hasHigherQualification,
+        previousQualification: hasHigherQualification ? previousQualification : null,
+      });
+      markProfileComplete();
+      navigate("/dashboard");
+    } catch (err) {
+      setFormError(err?.message || "Could not save your profile. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-paper pb-20">
+      <header className="border-b border-slate-200/70 px-6 py-4">
+        <Logo />
+      </header>
+
+      <div className="mx-auto max-w-2xl px-6 py-10">
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          {firstName ? `Welcome, ${firstName}` : "Build your profile"}
+        </h1>
+        <p className="mt-2 text-slate-600">
+          This is what NexStep checks against every exam's eligibility rules — the more complete, the
+          more accurate your matches. Only your date of birth, nationality and state are required.
+        </p>
+
+        <form onSubmit={handleSubmit} noValidate className="mt-8 flex flex-col gap-6">
+          {formError && (
+            <p className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-amber-600 ring-1 ring-inset ring-amber-200">
+              {formError}
+            </p>
+          )}
+
+          <Card className="flex flex-col gap-5">
+            <h2 className="font-display text-base font-semibold text-ink">Personal details</h2>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <TextField id="dob" label="Date of birth" type="date" required value={form.dob} error={errors.dob} onChange={(e) => updateField("dob", e.target.value)} />
+              <TextField id="nationality" label="Nationality" required value={form.nationality} error={errors.nationality} onChange={(e) => updateField("nationality", e.target.value)} />
+              <TextField id="state" label="State" required value={form.state} error={errors.state} onChange={(e) => updateField("state", e.target.value)} />
+            </div>
+          </Card>
+
+          <Card className="flex flex-col gap-5">
+            <div>
+              <h2 className="font-display text-base font-semibold text-ink">Academic details</h2>
+              <p className="text-sm text-slate-500">
+                Optional — add them now or later. Exams that check academic details will show
+                "add this to your profile" until you do.
+              </p>
+            </div>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <TextField id="college" label="College" value={form.college} error={errors.college} onChange={(e) => updateField("college", e.target.value)} />
+              <TextField id="branch" label="Branch" value={form.branch} error={errors.branch} onChange={(e) => updateField("branch", e.target.value)} />
+              <SelectField id="yearOfStudy" label="Year of study" value={form.yearOfStudy} error={errors.yearOfStudy} onChange={(e) => updateField("yearOfStudy", e.target.value)}>
+                <option value="">Select year</option>
+                {YEAR_OPTIONS.map((y) => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </SelectField>
+              <div className="grid grid-cols-2 gap-3">
+                <TextField id="cgpa" label="CGPA" placeholder="e.g. 8.7" error={errors.cgpa} value={form.cgpa} onChange={(e) => updateField("cgpa", e.target.value)} />
+                <TextField id="percentage" label="Percentage" placeholder="e.g. 82%" value={form.percentage} onChange={(e) => updateField("percentage", e.target.value)} />
+              </div>
+            </div>
+          </Card>
+
+          <Card className="flex flex-col gap-5">
+            <div className="flex items-start gap-3 rounded-xl bg-indigo-50 p-4">
+              <GraduationCap size={18} className="mt-0.5 shrink-0 text-gold" />
+              <label className="flex flex-1 cursor-pointer items-start gap-3 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 rounded border-slate-300 text-gold focus:ring-indigo-500"
+                  checked={hasHigherQualification}
+                  onChange={(e) => setHasHigherQualification(e.target.checked)}
+                />
+                I'm pursuing or have completed a Master's/PhD — I'll add my previous qualification too.
+              </label>
+            </div>
+
+            {hasHigherQualification && (
+              <div className="grid gap-5 sm:grid-cols-2">
+                <SelectField
+                  id="prevLevel"
+                  label="Previous qualification"
+                  value={previousQualification.level}
+                  onChange={(e) => setPreviousQualification((p) => ({ ...p, level: e.target.value }))}
+                >
+                  {QUALIFICATION_LEVELS.map((l) => (
+                    <option key={l} value={l}>{l}</option>
+                  ))}
+                </SelectField>
+                <TextField
+                  id="prevInstitution"
+                  label="Institution"
+                  value={previousQualification.institution}
+                  onChange={(e) => setPreviousQualification((p) => ({ ...p, institution: e.target.value }))}
+                />
+                <TextField
+                  id="prevField"
+                  label="Field of study"
+                  value={previousQualification.field}
+                  onChange={(e) => setPreviousQualification((p) => ({ ...p, field: e.target.value }))}
+                />
+                <TextField
+                  id="prevYear"
+                  label="Year completed"
+                  value={previousQualification.yearCompleted}
+                  onChange={(e) => setPreviousQualification((p) => ({ ...p, yearCompleted: e.target.value }))}
+                />
+                <TextField
+                  id="prevScore"
+                  label="CGPA / Percentage"
+                  value={previousQualification.score}
+                  onChange={(e) => setPreviousQualification((p) => ({ ...p, score: e.target.value }))}
+                />
+              </div>
+            )}
+          </Card>
+
+          <Card className="flex flex-col gap-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display text-base font-semibold text-ink">Educational qualifications</h2>
+                <p className="text-sm text-slate-500">Optional — blank rows are ignored.</p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                className="px-3 py-1.5 text-sm"
+                onClick={() => setQualifications((rows) => [...rows, emptyQualification()])}
+              >
+                <Plus size={15} /> Add
+              </Button>
+            </div>
+            {qualifications.map((row, i) => (
+              <div key={i} className="grid gap-4 border-t border-slate-100 pt-5 first:border-none first:pt-0 sm:grid-cols-2">
+                <SelectField id={`qlevel-${i}`} label="Level" value={row.level} onChange={(e) => updateQualification(i, "level", e.target.value)}>
+                  {QUALIFICATION_LEVELS.map((l) => (
+                    <option key={l} value={l}>{l}</option>
+                  ))}
+                </SelectField>
+                <TextField id={`qinst-${i}`} label="Institution" value={row.institution} onChange={(e) => updateQualification(i, "institution", e.target.value)} />
+                <TextField id={`qfield-${i}`} label="Field of study" value={row.field} onChange={(e) => updateQualification(i, "field", e.target.value)} />
+                <div className="flex gap-3">
+                  <TextField id={`qyear-${i}`} label="Year completed" className="flex-1" value={row.yearCompleted} onChange={(e) => updateQualification(i, "yearCompleted", e.target.value)} />
+                  <TextField id={`qscore-${i}`} label="Score" className="flex-1" value={row.score} onChange={(e) => updateQualification(i, "score", e.target.value)} />
+                  {qualifications.length > 1 && (
+                    <button
+                      type="button"
+                      aria-label="Remove qualification"
+                      onClick={() => setQualifications((rows) => rows.filter((_, idx) => idx !== i))}
+                      className="mt-7 h-fit shrink-0 rounded-lg p-2.5 text-slate-400 hover:bg-amber-50 hover:text-amber-600"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </Card>
+
+          <Card className="flex flex-col gap-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="font-display text-base font-semibold text-ink">Work experience</h2>
+                <p className="text-sm text-slate-500">Optional — skip if you're a fresh graduate.</p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                className="px-3 py-1.5 text-sm"
+                onClick={() => setWorkExperience((rows) => [...rows, emptyWorkExperience()])}
+              >
+                <Plus size={15} /> Add
+              </Button>
+            </div>
+            {workExperience.map((row, i) => (
+              <div key={i} className="grid gap-4 border-t border-slate-100 pt-5 first:border-none first:pt-0 sm:grid-cols-3">
+                <TextField id={`wcompany-${i}`} label="Company" value={row.company} onChange={(e) => updateWorkExperience(i, "company", e.target.value)} />
+                <TextField id={`wrole-${i}`} label="Role" value={row.role} onChange={(e) => updateWorkExperience(i, "role", e.target.value)} />
+                <div className="flex gap-3">
+                  <TextField id={`wduration-${i}`} label="Duration" className="flex-1" placeholder="e.g. 6 months" value={row.duration} onChange={(e) => updateWorkExperience(i, "duration", e.target.value)} />
+                  <button
+                    type="button"
+                    aria-label="Remove work experience"
+                    onClick={() => setWorkExperience((rows) => rows.filter((_, idx) => idx !== i))}
+                    className="mt-7 h-fit shrink-0 rounded-lg p-2.5 text-slate-400 hover:bg-amber-50 hover:text-amber-600"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </Card>
+
+          <Button type="submit" loading={saving} className="w-full">
+            Save profile & see my matches
+          </Button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+=== FILE: frontend\src\pages\SearchExams.jsx ===
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { Search } from "lucide-react";
+import Card from "../components/ui/Card";
+import EligibilityPill from "../components/ui/EligibilityPill";
+import { useProfile } from "../context/ProfileContext";
+import * as examsApi from "../api/exams";
+import { formatDate } from "../utils/date";
+
+export default function SearchExams() {
+  const { profile, exams } = useProfile();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState(exams);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setResults(exams);
+      return;
+    }
+    const handle = setTimeout(() => {
+      examsApi.searchExams(query, profile).then(setResults);
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [query, profile, exams]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">Browse exams</h1>
+        <p className="mt-1.5 text-slate-600">
+          Search by name, organization, or category. Eligibility is still checked automatically.
+        </p>
+      </div>
+
+      <div className="relative">
+        <Search size={17} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search exams, e.g. GATE, IIM, civil services..."
+          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 text-[15px] text-ink placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+        />
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {results.length === 0 && (
+          <Card>
+            <p className="text-sm text-slate-500">No exams match "{query}".</p>
+          </Card>
+        )}
+        {results.map((exam) => (
+          <Card key={exam.id} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5">
+                <h3 className="font-display font-semibold text-ink">{exam.name}</h3>
+                <EligibilityPill eligible={exam.eligible} deadline={exam.applicationDeadline} size="sm" />
+              </div>
+              <p className="mt-1 text-sm text-slate-500">{exam.organization} · {exam.category}</p>
+              <p className="mt-2 font-mono text-xs text-slate-500">
+                Apply by {formatDate(exam.applicationDeadline)} · Exam on {formatDate(exam.examDate)}
+              </p>
+            </div>
+            <Link
+              to={`/exams/${exam.id}`}
+              className="shrink-0 rounded-xl px-4 py-2 text-center text-sm font-medium text-gold ring-1 ring-inset ring-indigo-100 transition hover:bg-indigo-50"
+            >
+              View details
+            </Link>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\Settings.jsx ===
+import { Link, useNavigate } from "react-router-dom";
+import { Pencil, LogOut } from "lucide-react";
+import Card from "../components/ui/Card";
+import Button from "../components/ui/Button";
+import { useAuth } from "../context/AuthContext";
+import { useProfile } from "../context/ProfileContext";
+
+function Row({ label, value }) {
+  return (
+    <div className="flex items-center justify-between border-b border-slate-100 py-3 last:border-none">
+      <span className="text-sm text-slate-500">{label}</span>
+      <span className="text-sm font-medium text-ink">{value || "—"}</span>
+    </div>
+  );
+}
+
+export default function Settings() {
+  const { user, logout } = useAuth();
+  const { profile, loading } = useProfile();
+  const navigate = useNavigate();
+
+  function handleLogout() {
+    logout();
+    navigate("/");
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">Profile & settings</h1>
+        <p className="mt-1.5 text-slate-600">Keep your academic details current — eligibility is re-checked automatically.</p>
+      </div>
+
+      <Card>
+        <Row label="Name" value={user?.name} />
+        <Row label="Email" value={user?.email} />
+      </Card>
+
+      {!loading && profile && (
+        <Card>
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="font-display text-base font-semibold text-ink">Academic details</h2>
+            <Link to="/profile/setup" className="flex items-center gap-1.5 text-sm font-medium text-gold hover:underline">
+              <Pencil size={14} /> Edit
+            </Link>
+          </div>
+          <Row label="College" value={profile.college} />
+          <Row label="Branch" value={profile.branch} />
+          <Row label="Year of study" value={profile.yearOfStudy} />
+          <Row label="CGPA" value={profile.cgpa} />
+          <Row label="Percentage" value={profile.percentage} />
+          <Row label="State" value={profile.state} />
+          <Row label="Nationality" value={profile.nationality} />
+          {profile.hasHigherQualification && profile.previousQualification && (
+            <Row
+              label="Previous qualification"
+              value={`${profile.previousQualification.level} · ${profile.previousQualification.institution || "—"}`}
+            />
+          )}
+        </Card>
+      )}
+
+      {!loading && !profile && (
+        <Card className="flex items-center justify-between">
+          <p className="text-sm text-slate-500">You haven't built your profile yet.</p>
+          <Link to="/profile/setup" className="text-sm font-medium text-gold hover:underline">
+            Build profile
+          </Link>
+        </Card>
+      )}
+
+      <Button variant="danger" onClick={handleLogout} className="w-fit">
+        <LogOut size={15} /> Log out
+      </Button>
+    </div>
+  );
+}
+
+
+=== FILE: frontend\src\pages\Signup.jsx ===
+import { useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import PublicNavbar from "../components/layout/PublicNavbar";
+import { TextField } from "../components/ui/Field";
+import Button from "../components/ui/Button";
+import { useAuth } from "../context/AuthContext";
+
+export default function Signup() {
+  const { startSignup, verifySignup, resendSignupCode } = useAuth();
+  const navigate = useNavigate();
+
+  const [step, setStep] = useState("form"); // "form" -> "verify"
+  const [form, setForm] = useState({ name: "", email: "", password: "", confirm: "" });
+  const [code, setCode] = useState("");
+  const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+
+  // Counts down the "resend" wait.
+  useEffect(() => {
+    if (cooldown <= 0) return undefined;
+    const timer = setTimeout(() => setCooldown((s) => s - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [cooldown]);
+
+  function validate() {
+    const next = {};
+    if (!form.name.trim()) next.name = "Enter your full name.";
+    if (!/^\S+@\S+\.\S{2,}$/.test(form.email.trim())) next.email = "Enter a valid email address.";
+    if (form.password.length < 6) next.password = "Password must be at least 6 characters.";
+    if (form.confirm !== form.password) next.confirm = "Passwords don't match.";
+    setErrors(next);
+    return Object.keys(next).length === 0;
+  }
+
+  // Step 1: email the code. No account is created yet.
+  async function handleStart(e) {
+    e.preventDefault();
+    setFormError("");
+    setNotice("");
+    if (!validate()) return;
+    setLoading(true);
+    try {
+      const res = await startSignup(form);
+      setCooldown(res?.resendAfterSeconds ?? 60);
+      setCode("");
+      setStep("verify");
+    } catch (err) {
+      setFormError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Step 2: confirm the code. The account is created only now.
+  async function handleVerify(e) {
+    e.preventDefault();
+    setFormError("");
+    setNotice("");
+    if (!/^\d{6}$/.test(code)) {
+      setFormError("Enter the 6-digit code from your email.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await verifySignup(form.email, code);
+      navigate("/profile/setup");
+    } catch (err) {
+      setFormError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleResend() {
+    setFormError("");
+    setNotice("");
+    setResending(true);
+    try {
+      const res = await resendSignupCode(form.email);
+      setCooldown(res?.resendAfterSeconds ?? 60);
+      setCode("");
+      setNotice("We sent you a new code.");
+    } catch (err) {
+      setFormError(err.message);
+    } finally {
+      setResending(false);
+    }
+  }
+
+  function backToForm() {
+    setStep("form");
+    setCode("");
+    setFormError("");
+    setNotice("");
+  }
+
+  return (
+    <div className="min-h-screen bg-paper">
+      <PublicNavbar />
+      <div className="mx-auto flex max-w-md flex-col px-6 py-16">
+        {step === "form" ? (
+          <>
+            <h1 className="font-display text-3xl font-semibold tracking-tight text-ink">Create your account</h1>
+            <p className="mt-2 text-slate-600">
+              Takes a minute. We'll email you a code to confirm your address.
+            </p>
+
+            <form onSubmit={handleStart} noValidate className="mt-8 flex flex-col gap-5">
+              {formError && (
+                <p className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-amber-600 ring-1 ring-inset ring-amber-200">
+                  {formError}
+                </p>
+              )}
+              <TextField
+                id="name"
+                label="Full name"
+                autoComplete="name"
+                required
+                value={form.name}
+                error={errors.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+              <TextField
+                id="email"
+                label="Email"
+                type="email"
+                autoComplete="email"
+                required
+                value={form.email}
+                error={errors.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+              />
+              <TextField
+                id="password"
+                label="Password"
+                type="password"
+                autoComplete="new-password"
+                required
+                hint="At least 6 characters."
+                value={form.password}
+                error={errors.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+              <TextField
+                id="confirm"
+                label="Confirm password"
+                type="password"
+                autoComplete="new-password"
+                required
+                value={form.confirm}
+                error={errors.confirm}
+                onChange={(e) => setForm({ ...form, confirm: e.target.value })}
+              />
+              <Button type="submit" loading={loading} className="mt-2 w-full">
+                Send verification code
+              </Button>
+            </form>
+
+            <p className="mt-8 text-center text-sm text-slate-500">
+              Already on NexStep?{" "}
+              <Link to="/login" className="font-medium text-gold hover:underline">
+                Log in
+              </Link>
+            </p>
+          </>
+        ) : (
+          <>
+            <h1 className="font-display text-3xl font-semibold tracking-tight text-ink">Check your email</h1>
+            <p className="mt-2 text-slate-600">
+              We sent a 6-digit code to <span className="font-medium text-ink">{form.email.trim()}</span>.
+              It expires in 10 minutes. Your account is created once you confirm it.
+            </p>
+
+            <form onSubmit={handleVerify} noValidate className="mt-8 flex flex-col gap-5">
+              {formError && (
+                <p className="rounded-xl bg-amber-50 px-3.5 py-2.5 text-sm text-amber-600 ring-1 ring-inset ring-amber-200">
+                  {formError}
+                </p>
+              )}
+              {notice && (
+                <p className="rounded-xl bg-signal-50 px-3.5 py-2.5 text-sm text-signal-600 ring-1 ring-inset ring-slate-200">
+                  {notice}
+                </p>
+              )}
+              <TextField
+                id="code"
+                label="Verification code"
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                placeholder="123456"
+                required
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              />
+              <Button type="submit" loading={loading} className="w-full">
+                Verify and create account
+              </Button>
+            </form>
+
+            <div className="mt-6 flex flex-col items-center gap-2 text-sm text-slate-500">
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={cooldown > 0 || resending}
+                className="font-medium text-gold hover:underline disabled:cursor-not-allowed disabled:opacity-50 disabled:no-underline"
+              >
+                {resending
+                  ? "Sending…"
+                  : cooldown > 0
+                  ? `Resend code in ${cooldown}s`
+                  : "Resend code"}
+              </button>
+              <button type="button" onClick={backToForm} className="hover:underline">
+                Use a different email
+              </button>
+              <p className="text-xs text-slate-400">Can't find it? Check your spam folder.</p>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+=== FILE: frontend\src\pages\UpcomingExams.jsx ===
+import { Link } from "react-router-dom";
+import { useProfile } from "../context/ProfileContext";
+import EligibilityPill from "../components/ui/EligibilityPill";
+import Card from "../components/ui/Card";
+import { formatDate, daysUntil } from "../utils/date";
+
+function getLatestNotification(exam) {
+  return exam.latest_approved_notification || null;
+}
+
+function getApplicationDeadline(exam) {
+  return getLatestNotification(exam)?.application_end_date || null;
+}
+
+function getExamDate(exam) {
+  const dates = getLatestNotification(exam)?.exam_dates || [];
+
+  if (dates.length === 0) {
+    return null;
+  }
+
+  return [...dates]
+    .sort(
+      (a, b) =>
+        new Date(a.start_date).getTime() -
+        new Date(b.start_date).getTime()
+    )[0]?.start_date || null;
+}
+
+export default function UpcomingExams() {
+  const { eligibleExams, loading } = useProfile();
+
+  const timeline = eligibleExams
+    .flatMap((exam) => [
+      {
+        exam,
+        label: "Application deadline",
+        date: getApplicationDeadline(exam),
+      },
+      {
+        exam,
+        label: "Exam date",
+        date: getExamDate(exam),
+      },
+    ])
+    .filter((item) => {
+      if (!item.date) return false;
+
+      const days = daysUntil(item.date);
+      return days === null || days >= -1;
+    })
+    .sort(
+      (a, b) =>
+        new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          Upcoming deadlines & exams
+        </h1>
+
+        <p className="mt-1.5 text-slate-600">
+          Everything you're eligible for, in the order it happens.
+        </p>
+      </div>
+
+      {loading && (
+        <p className="text-sm text-slate-400">
+          Loading your timeline...
+        </p>
+      )}
+
+      {!loading && timeline.length === 0 && (
+        <Card>
+          <p className="text-sm text-slate-500">
+            Nothing eligible on your timeline right now. Check{" "}
+            <Link
+              to="/eligibility"
+              className="font-medium text-gold hover:underline"
+            >
+              eligibility results
+            </Link>{" "}
+            as your profile updates.
+          </p>
+        </Card>
+      )}
+
+      <div className="relative flex flex-col">
+        {timeline.length > 0 && (
+          <div className="absolute bottom-2 left-[7px] top-2 w-px step-line" />
+        )}
+
+        {timeline.map((item, index) => {
+          const deadline = getApplicationDeadline(item.exam);
+
+          return (
+            <div
+              key={`${item.exam.exam_id}-${item.label}-${index}`}
+              className="relative flex gap-4 pb-6 last:pb-0"
+            >
+              <span className="relative z-10 mt-1.5 h-3.5 w-3.5 shrink-0 rounded-full border-2 border-white bg-indigo-600 ring-4 ring-paper" />
+
+              <Card className="flex-1">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">
+                      {item.label}
+                    </p>
+
+                    <p className="mt-0.5 font-mono text-sm font-medium text-ink">
+                      {formatDate(item.date)}
+                    </p>
+                  </div>
+
+                  <EligibilityPill
+                    eligible={item.exam.eligible}
+                    deadline={deadline}
+                    size="sm"
+                  />
+                </div>
+
+                <Link
+                  to={`/exams/${item.exam.exam_id}`}
+                  className="mt-3 block font-display font-semibold text-ink hover:text-gold"
+                >
+                  {item.exam.name}
+                </Link>
+
+                <p className="text-sm text-slate-500">
+                  {item.exam.conducting_body?.name || "—"}
+                </p>
+              </Card>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

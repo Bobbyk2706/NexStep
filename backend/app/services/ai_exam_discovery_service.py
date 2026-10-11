@@ -19,6 +19,7 @@ from sqlalchemy import select
 from app.ai.aggregated_extraction_result import (
     AggregatedExtractionResult,
 )
+from app.ai.document_gate import classify_document
 from app.ai.document_models import (
     DocumentPage,
     ParsedDocument,
@@ -900,12 +901,11 @@ def _pdf_content_looks_relevant(
         )
 
         try:
-            first_pages_text = " ".join(
-                page.get_text()
-                for page in list(document)[:2]
-            ).lower()
+            pages_text = [page.get_text() for page in document]
         finally:
             document.close()
+
+        first_pages_text = " ".join(pages_text[:2]).lower()
 
     except Exception:
         return True, ""
@@ -916,7 +916,8 @@ def _pdf_content_looks_relevant(
     heading_text = first_pages_text[:300]
 
     for keyword in _NEGATIVE_PDF_KEYWORDS:
-        if keyword in heading_text:
+        # Whole words only: "rti" must not match "certificate".
+        if re.search(rf"\b{re.escape(keyword)}\b", heading_text):
             return False, (
                 f"document heading matches non-notification "
                 f"page type ('{keyword}')"
@@ -936,6 +937,13 @@ def _pdf_content_looks_relevant(
                 f"({', '.join(exam_tokens)}) appear anywhere in "
                 "the document text"
             )
+
+    # Right exam name, wrong kind of document: a calendar, a schedule
+    # notice, an admit-card notice, or last year's notification.
+    gate = classify_document(pages_text, exam_name)
+
+    if not gate.ok:
+        return False, gate.reason
 
     return True, ""
 

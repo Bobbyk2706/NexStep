@@ -53,7 +53,7 @@ export default function SearchExams() {
             <div className="min-w-0">
               <div className="flex items-center gap-2.5">
                 <h3 className="font-display font-semibold text-ink">{exam.name}</h3>
-                <EligibilityPill eligible={exam.eligible} deadline={exam.applicationDeadline} size="sm" />
+                <EligibilityPill eligible={exam.eligible} unknown={exam.eligibilityUnknown} deadline={exam.applicationDeadline} size="sm" />
               </div>
               <p className="mt-1 text-sm text-slate-500">{exam.organization} · {exam.category}</p>
               <p className="mt-2 font-mono text-xs text-slate-500">
@@ -72,3 +72,4 @@ export default function SearchExams() {
     </div>
   );
 }
+

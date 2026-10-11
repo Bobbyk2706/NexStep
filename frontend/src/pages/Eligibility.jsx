@@ -5,7 +5,7 @@ import EligibilityPill from "../components/ui/EligibilityPill";
 import { useProfile } from "../context/ProfileContext";
 import { formatDate } from "../utils/date";
 
-const FILTERS = ["All", "Eligible", "Not eligible"];
+const FILTERS = ["All", "Eligible", "Not eligible", "Check notice"];
 
 export default function Eligibility() {
   const { exams, loading } = useProfile();
@@ -13,7 +13,8 @@ export default function Eligibility() {
 
   const filtered = exams.filter((e) => {
     if (filter === "Eligible") return e.eligible;
-    if (filter === "Not eligible") return !e.eligible;
+    if (filter === "Not eligible") return !e.eligible && !e.eligibilityUnknown;
+    if (filter === "Check notice") return Boolean(e.eligibilityUnknown);
     return true;
   });
 
@@ -55,7 +56,7 @@ export default function Eligibility() {
             <div className="min-w-0">
               <div className="flex items-center gap-2.5">
                 <h3 className="font-display font-semibold text-ink">{exam.name}</h3>
-                <EligibilityPill eligible={exam.eligible} deadline={exam.applicationDeadline} size="sm" />
+                <EligibilityPill eligible={exam.eligible} unknown={exam.eligibilityUnknown} deadline={exam.applicationDeadline} size="sm" />
               </div>
               <p className="mt-1 text-sm text-slate-500">{exam.organization}</p>
               <p className="mt-1.5 text-xs text-slate-400">{exam.reason}</p>
@@ -75,3 +76,4 @@ export default function Eligibility() {
     </div>
   );
 }
+

@@ -11,12 +11,22 @@ function daysUntil(dateStr) {
   return diff;
 }
 
-export default function EligibilityPill({ eligible, deadline, size = "md" }) {
+export default function EligibilityPill({ eligible, unknown = false, deadline, size = "md" }) {
   const days = deadline ? daysUntil(deadline) : null;
   const closingSoon = eligible && days !== null && days >= 0 && days <= 14;
 
   const sizeClasses = size === "sm" ? "text-[10px] px-2 py-1" : "text-[11px] px-2.5 py-1.5";
   const base = `inline-flex items-center gap-2 border font-mono uppercase tracking-wide ${sizeClasses}`;
+
+  // The notification lists no rules NexStep can check: neither a yes nor a no.
+  if (unknown) {
+    return (
+      <span className={`${base} border-slate-200 text-slate-500`}>
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full border border-slate-400" />
+        Check notice
+      </span>
+    );
+  }
 
   if (closingSoon) {
     return (
@@ -43,3 +53,4 @@ export default function EligibilityPill({ eligible, deadline, size = "md" }) {
     </span>
   );
 }
+

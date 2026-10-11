@@ -46,13 +46,16 @@ class ScriptedProvider(AIProvider):
     def _identity(self, c):
         return {"exam_name": fact(c, "GATE 2027", "GATE 2027"),
                 "conducting_body": fact(c, "IIT Madras", "IIT Madras"),
-                "release_date": fact(c, "2026-08-27", "27th August 2026")}
+                # The brochure is a revised version ("Revised version, Date:
+                # 27th September 2026"); the earlier 27 August date is struck
+                # out in it and is no longer part of the document.
+                "release_date": fact(c, "2026-09-27", "27th September 2026")}
 
     def _dates(self, c):
         return {
-            "application_start_date": EMPTY,
-            "application_end_date": fact(c, "2026-09-27", "Sunday, September 27, 2026"),
-            "late_fee_end_date": fact(c, "2026-10-05", "Monday, October 5, 2026"),
+            "application_start_date": fact(c, "2026-09-02", "Wednesday, September 2, 2026"),
+            "application_end_date": fact(c, "2026-10-05", "Monday, October 5, 2026"),
+            "late_fee_end_date": fact(c, "2026-10-12", "Monday, October 12, 2026"),
             "exam_dates": [
                 {"label": "Week 1", "start_date": "2027-02-06", "end_date": "2027-02-07",
                  "quote": "February 6 & 7, 2027", "passage": passage_id(c, "February 6 & 7, 2027")},
@@ -85,3 +88,4 @@ GATE_ANSWERS = None
 class FakeProvider(ScriptedProvider):
     def __init__(self, answers=None):
         super().__init__(None)
+

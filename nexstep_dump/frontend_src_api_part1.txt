@@ -1,0 +1,574 @@
+
+=== FILE: frontend\src\api\assistant.js ===
+import { request, ApiError } from "./client";
+
+// Backend: POST /api/assistant/chat
+// (app/routers/chatbot_router.py -> app/services/chatbot_service.py).
+//
+// `history` is the running conversation as [{role, content}], oldest
+// first, matching what the chat UI already keeps in state.
+export async function askAssistant(message, history = []) {
+  try {
+    const data = await request("/assistant/chat", {
+      method: "POST",
+      body: {
+        message,
+        history: history
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .filter((m) => typeof m.content === "string" && m.content)
+          .slice(-6),
+      },
+    });
+
+    return { kind: "ok", data };
+  } catch (err) {
+    if (err instanceof ApiError && err.status >= 500) {
+      return { kind: "backend-unavailable" };
+    }
+    if (err instanceof ApiError) {
+      // 4xx (e.g. auth expired) — surface as backend-unavailable too;
+      // the chat UI has no dedicated "please log in again" state yet.
+      return { kind: "backend-unavailable" };
+    }
+    // fetch() itself threw — no response at all (offline, DNS, CORS).
+    return { kind: "network-error" };
+  }
+}
+
+export function toChatMessage(thinkingId, result) {
+  if (result.kind === "backend-unavailable") {
+    return { id: thinkingId, role: "assistant", status: "backend-unavailable" };
+  }
+  if (result.kind === "network-error") {
+    return { id: thinkingId, role: "assistant", status: "network-error" };
+  }
+
+  const { answer, sources, grounded } = result.data;
+
+  if (!grounded && (!sources || sources.length === 0)) {
+    return { id: thinkingId, role: "assistant", status: "no-info" };
+  }
+
+  return {
+    id: thinkingId,
+    role: "assistant",
+    status: "done",
+    content: answer,
+    sources: (sources || []).map((s) => ({
+      id: s.exam_id,
+      title: s.exam_name,
+      category: s.notification_title || "Official notification",
+    })),
+  };
+}
+
+
+=== FILE: frontend\src\api\auth.js ===
+import { request, setToken, getToken } from "./client";
+
+// Requires a real dotted domain with a 2+ letter ending, so
+// "example@nexstep" is rejected but "name@college.ac.in" passes.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@.]{2,}$/;
+
+export function isValidEmail(value) {
+  return EMAIL_PATTERN.test((value || "").trim());
+}
+
+const EMAIL_ERROR = "Enter a valid email address, like name@example.com.";
+
+/**
+ * Student login.
+ *
+ * Backend: POST /auth/login
+ * Response: { token, user: { name, email }, hasProfile }
+ */
+export async function login({ email, password }) {
+  if (!email || !password) {
+    throw new Error("Enter your email and password.");
+  }
+
+  const cleanEmail = email.trim();
+
+  if (!isValidEmail(cleanEmail)) {
+    throw new Error(EMAIL_ERROR);
+  }
+
+  const data = await request("/auth/login", {
+    method: "POST",
+    body: { email: cleanEmail, password },
+    auth: false,
+  });
+
+  if (!data?.token) {
+    throw new Error("Login succeeded but no authentication token was returned.");
+  }
+
+  setToken(data.token);
+
+  return data;
+}
+
+/**
+ * Signup step 1: email a verification code. No account is created yet.
+ *
+ * Backend: POST /auth/register/start
+ * Response: { email, expiresInSeconds, resendAfterSeconds }
+ */
+export async function startSignup({ name, email, password }) {
+  if (!name || !email || !password) {
+    throw new Error("Fill in your name, email, and password.");
+  }
+
+  const cleanEmail = email.trim();
+
+  if (!isValidEmail(cleanEmail)) {
+    throw new Error(EMAIL_ERROR);
+  }
+
+  if (password.length < 6) {
+    throw new Error("Password must be at least 6 characters.");
+  }
+
+  return request("/auth/register/start", {
+    method: "POST",
+    body: { name: name.trim(), email: cleanEmail, password },
+    auth: false,
+  });
+}
+
+/**
+ * Signup step 2: confirm the code. The account is created only now.
+ *
+ * Backend: POST /auth/register/verify
+ * Response: { token, user: { name, email }, hasProfile: false }
+ */
+export async function verifySignup({ email, code }) {
+  if (!/^\d{6}$/.test((code || "").trim())) {
+    throw new Error("Enter the 6-digit code from your email.");
+  }
+
+  const data = await request("/auth/register/verify", {
+    method: "POST",
+    body: { email: email.trim(), code: code.trim() },
+    auth: false,
+  });
+
+  if (!data?.token) {
+    throw new Error("Verification succeeded but no authentication token was returned.");
+  }
+
+  setToken(data.token);
+
+  return data;
+}
+
+/**
+ * Send a fresh code.
+ *
+ * Backend: POST /auth/register/resend
+ */
+export async function resendSignupCode(email) {
+  return request("/auth/register/resend", {
+    method: "POST",
+    body: { email: email.trim() },
+    auth: false,
+  });
+}
+
+/**
+ * Get the currently authenticated user.
+ *
+ * Backend: GET /auth/me
+ */
+export async function getCurrentUser() {
+  if (!getToken()) {
+    return null;
+  }
+
+  return request("/auth/me");
+}
+
+/**
+ * Logout.
+ *
+ * Backend: POST /auth/logout
+ * The backend invalidates the user's token version.
+ */
+export async function logout() {
+  try {
+    if (getToken()) {
+      await request("/auth/logout", {
+        method: "POST",
+      });
+    }
+  } finally {
+    setToken(null);
+  }
+}
+
+=== FILE: frontend\src\api\client.js ===
+// Central API client used by the student and admin apps.
+//
+// `baseUrl` is configurable so the student API (/api) and the admin
+// extraction routes (mounted at /admin) can share the same request logic.
+
+export const BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api";
+
+const TOKEN_KEY = "nexstep_token";
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token) {
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token);
+  } else {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+}
+
+export class ApiError extends Error {
+  constructor(message, status, extra = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = extra.code ?? null;
+    this.officialUrl = extra.officialUrl ?? null;
+    this.pagesChecked = extra.pagesChecked ?? null;
+  }
+}
+
+export function createClient({
+  getToken: readToken,
+  refresh,
+  onUnauthorized,
+  baseUrl = BASE_URL,
+}) {
+  async function send(path, { method, body, headers }) {
+    const token = readToken();
+
+    const res = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token
+          ? {
+              Authorization: `Bearer ${token}`,
+            }
+          : {}),
+        ...headers,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+
+    return {
+      res,
+      sentToken: Boolean(token),
+    };
+  }
+
+  return async function request(
+    path,
+    {
+      method = "GET",
+      body,
+      headers = {},
+      auth = true,
+    } = {}
+  ) {
+    const options = {
+      method,
+      body,
+      headers,
+    };
+
+    let { res, sentToken } = await send(path, options);
+
+    if (res.status === 401 && auth && sentToken) {
+      let refreshed = false;
+
+      if (refresh) {
+        try {
+          refreshed = await refresh();
+        } catch {
+          refreshed = false;
+        }
+      }
+
+      if (refreshed) {
+        ({ res } = await send(path, options));
+      }
+
+      if (res.status === 401) {
+        onUnauthorized?.();
+      }
+    }
+
+        if (!res.ok) {
+      let message = `Request failed (${res.status})`;
+      let extra = {};
+
+      try {
+        const data = await res.json();
+        const d = data?.detail;
+
+        if (typeof d === "string") {
+          message = d;
+        } else if (Array.isArray(d)) {
+          // FastAPI validation errors: [{ loc, msg, type }, ...]
+          message = d.map((item) => item?.msg).filter(Boolean).join("; ") || message;
+        } else if (d && typeof d === "object") {
+          message = d.message || message;
+          extra = {
+            code: d.code,
+            officialUrl: d.official_url,
+            pagesChecked: d.pages_checked,
+          };
+        } else {
+          message = data?.message || data?.error || message;
+        }
+      } catch {
+        // Keep the generic message for non-JSON responses.
+      }
+
+      throw new ApiError(message, res.status, extra);
+    }
+
+    if (res.status === 204) {
+      return null;
+    }
+
+    const contentType = res.headers.get("content-type") || "";
+
+    if (!contentType.includes("application/json")) {
+      return null;
+    }
+
+    return res.json();
+  };
+}
+
+const expiredListeners = new Set();
+
+export function onSessionExpired(fn) {
+  expiredListeners.add(fn);
+  return () => expiredListeners.delete(fn);
+}
+
+export const request = createClient({
+  getToken,
+  onUnauthorized() {
+    setToken(null);
+
+    expiredListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+        // One listener must not prevent the others from running.
+      }
+    });
+  },
+});
+
+
+=== FILE: frontend\src\api\exams.js ===
+import { request } from "./client";
+
+export async function getExams() {
+  return request("/exams");
+}
+
+export async function getExamById(id) {
+  if (id === undefined || id === null || id === "") {
+    throw new Error("Exam ID is required.");
+  }
+
+  return request(`/exams/${encodeURIComponent(id)}`);
+}
+
+export async function evaluateEligibility(id) {
+  if (id === undefined || id === null || id === "") {
+    throw new Error("Exam ID is required.");
+  }
+
+  return request(`/eligibility/${encodeURIComponent(id)}/evaluate`, {
+    method: "POST",
+  });
+}
+
+export async function getEligibility(id) {
+  if (id === undefined || id === null || id === "") {
+    throw new Error("Exam ID is required.");
+  }
+
+  return request(`/eligibility/${encodeURIComponent(id)}`);
+}
+
+function firstExamDate(notification) {
+  const dates = notification?.exam_dates || [];
+
+  if (dates.length === 0) {
+    return null;
+  }
+
+  return [...dates].sort(
+    (a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime()
+  )[0]?.start_date || null;
+}
+
+function mapEligibility(eligibility) {
+  const eligible = eligibility?.eligibility_status === "ELIGIBLE";
+
+  return {
+    eligible,
+    reason: eligibility?.reason || "No eligibility explanation was returned.",
+    eligibility,
+  };
+}
+
+function normalizeExam(exam, eligibility = null) {
+  const notification = exam?.latest_approved_notification || null;
+  const eligibilityData = mapEligibility(eligibility);
+
+  return {
+    ...exam,
+    id: exam.exam_id,
+    organization: exam.conducting_body?.name || "—",
+    category: exam.type || "—",
+    applicationStart: notification?.application_start_date || null,
+    applicationDeadline: notification?.application_end_date || null,
+    examDate: firstExamDate(notification),
+    officialLink: exam.off_exam_page || exam.conducting_body?.main_website || null,
+    eligibilityRule: eligibilityData.reason,
+    eligible: eligibilityData.eligible,
+    reason: eligibilityData.reason,
+    eligibility: eligibilityData.eligibility,
+  };
+}
+
+async function enrichExamList(exams) {
+  return Promise.all(
+    exams.map(async (exam) => {
+      const [detailResult, eligibilityResult] = await Promise.allSettled([
+        getExamById(exam.exam_id),
+        evaluateEligibility(exam.exam_id),
+      ]);
+
+      const fullExam =
+        detailResult.status === "fulfilled" ? detailResult.value : exam;
+      const eligibility =
+        eligibilityResult.status === "fulfilled"
+          ? eligibilityResult.value
+          : null;
+
+      const normalized = normalizeExam(fullExam, eligibility);
+
+      if (eligibilityResult.status === "rejected") {
+        normalized.eligible = false;
+        normalized.reason =
+          eligibilityResult.reason?.message ||
+          "Eligibility could not be evaluated for this exam.";
+        normalized.eligibilityRule = normalized.reason;
+      }
+
+      return normalized;
+    })
+  );
+}
+
+export async function searchExams(query) {
+  const trimmedQuery = query?.trim();
+
+  if (!trimmedQuery) {
+    return getExamsWithEligibility();
+  }
+
+  const exams = await request(`/exams/search?q=${encodeURIComponent(trimmedQuery)}`);
+  return enrichExamList(exams);
+}
+
+export async function getExamsWithEligibility() {
+  const exams = await getExams();
+  return enrichExamList(exams);
+}
+
+
+=== FILE: frontend\src\api\notifications.js ===
+import { request } from "./client";
+
+function normalizeType(value) {
+  const type = String(value || "").toUpperCase();
+
+  if (type.includes("DEADLINE")) return "deadline";
+  if (type.includes("ELIGIBLE")) return "new-eligible";
+  if (type.includes("EXAM")) return "exam";
+  return "update";
+}
+
+function normalizeNotification(notification) {
+  return {
+    ...notification,
+    id: notification.notification_id,
+    type: normalizeType(notification.notification_type),
+    read: Boolean(notification.is_read),
+    timestamp: notification.created_at,
+    examId: notification.exam_id,
+  };
+}
+
+export async function getNotifications() {
+  const data = await request("/notifications");
+  return (data || []).map(normalizeNotification);
+}
+
+export async function markAsRead(id) {
+  if (id === undefined || id === null || id === "") {
+    throw new Error("Notification ID is required.");
+  }
+
+  await request(`/notifications/${encodeURIComponent(id)}/read`, {
+    method: "POST",
+  });
+
+  return getNotifications();
+}
+
+export async function markAllAsRead() {
+  await request("/notifications/read-all", {
+    method: "POST",
+  });
+
+  return getNotifications();
+}
+
+
+=== FILE: frontend\src\api\profile.js ===
+
+import { request } from "./client";
+
+/**
+ * Get the currently authenticated student's profile.
+ *
+ * Backend:
+ * GET /student/profile
+ */
+export async function getProfile() {
+  return request("/student/profile");
+}
+
+/**
+ * Create/update the currently authenticated student's profile.
+ *
+ * Backend:
+ * PUT /student/profile
+ */
+export async function saveProfile(profile) {
+  return request("/student/profile", {
+    method: "PUT",
+    body: profile,
+  });
+}
+
+

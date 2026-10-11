@@ -9,6 +9,7 @@ Extraction pipeline v2 - the single entry point used by every workflow
 """
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,22 @@ def run_extraction(
             )
         )
 
+    # A calendar, result list or admit-card notice has no eligibility
+    # section. Say so plainly, because the reviewer would otherwise only see
+    # a list of dropped facts and "must contain at least one rule group".
+    if not _has_eligibility_wording(document):
+        issues.append(
+            ExtractionIssue(
+                severity="warning",
+                code="no-eligibility-section",
+                message=(
+                    "This document does not contain an eligibility section "
+                    "(age limit, qualification or nationality). It is "
+                    "probably not the main notification; check the source."
+                ),
+            )
+        )
+
     # ---- 2. passages + first retrieval to learn which pages matter -------
     request_budget = _request_budget(manager)
     budgets = {f: _context_budget(f, request_budget) for f in Facet}
@@ -214,6 +231,25 @@ def run_extraction(
         tba = "to be announced" in packs[Facet.DATES].text.lower() or " tba" in packs[Facet.DATES].text.lower()
         date_fields = compiler.compile_dates(drafts[Facet.DATES], grounder, tba)
 
+    # A revised notice carries the date of its revision ("Revised version,
+    # Date: 27th September 2026"), which is after applications opened. That is
+    # not when the notification was released, and the approval rules reject a
+    # release date after the application start, so it would block an otherwise
+    # valid extraction. Leave it empty and say why.
+    opening = date_fields.get("application_start_date")
+    if release_date and opening and release_date > opening:
+        grounder.issue(
+            "warning",
+            "release-date-after-application",
+            (
+                f"Release date {release_date} is after the application start "
+                f"date {opening}, so it looks like the date of a revised "
+                "version rather than the original release; it was left empty."
+            ),
+            "Release date",
+        )
+        release_date = None
+
     eligibility_info = EligibilityInformation()
     rules = EligibilityRulesData()
     if Facet.ELIGIBILITY in drafts:
@@ -308,6 +344,19 @@ def summarize(result: AggregatedExtractionResult) -> str:
     if result.blocking_issues:
         parts.append(f"{len(result.blocking_issues)} issue(s) need review before approval.")
     return " ".join(parts)
+
+
+_ELIGIBILITY_WORDING = re.compile(
+    r"\beligib\w*|\bage\s+limit|\beducational\s+qualification|"
+    r"\bnationality\b|\bcitizen",
+    re.IGNORECASE,
+)
+
+
+def _has_eligibility_wording(document: ParsedDocument) -> bool:
+    text = " ".join(page.text for page in document.pages)
+
+    return len(_ELIGIBILITY_WORDING.findall(text)) >= 2
 
 
 def _dedupe(issues: list[ExtractionIssue]) -> list[ExtractionIssue]:

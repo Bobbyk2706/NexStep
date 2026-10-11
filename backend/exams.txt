@@ -1,0 +1,65 @@
+# One exam name per line. Lines starting with # are ignored.
+# Use the year whose notification is currently published. If it is not
+# published yet, the result is NOT_FOUND and you can retry later.
+# Edit this list to the exams you want.
+
+# Engineering and science
+# JEE Advanced 2027
+# BITSAT 2027
+# VITEEE 2027
+# KCET 2027
+# KEAM 2027
+
+# Medical
+# NEET UG 2027
+
+# Management
+# Common Admission Test (CAT) 2026
+# XAT 2027
+# CMAT 2027
+
+# Government jobs
+# UPSC Civil Services Examination 2027
+# SSC Combined Graduate Level (CGL) 2026
+# SSC Multi Tasking Staff (MTS) 2026
+# IBPS PO 2026
+# IBPS Clerk 2026
+# SBI PO 2026
+# RRB NTPC 2026
+
+# Others
+# CLAT 2027
+# CUET UG 2027
+# UGC NET December 2026
+# NDA 2027
+# Joint Entrance Examination (Main) 2027
+
+ ----------------------------------------------------------------------------------------------------------------
+
+
+ # --- SSC (ssc.gov.in) ---
+SSC Combined Graduate Level Examination 2026
+SSC Combined Higher Secondary (10+2) Level Examination 2026
+SSC Junior Engineer Examination 2026
+
+# --- UPSC (upsc.gov.in) ---
+UPSC Engineering Services (Preliminary) Examination 2027
+UPSC Combined Geo-Scientist (Preliminary) Examination 2027
+-
+# --- Banking ---
+IBPS PO/MT CRP-PO/MT-XVI 2026
+IBPS Specialist Officer 2026
+IBPS Clerk CRP-CSA-XVI 2026
+SBI PO 2026
+RBI Grade B 2026
+
+# --- Railways ---
+RRB NTPC Graduate CEN 06/2026
+RRB NTPC Undergraduate CEN 07/2026
+RRB Junior Engineer 2026
+
+# --- Entrance, MBA, law, NET ---
+CAT 2026
+XAT 2027
+CLAT 2027
+Joint CSIR-UGC NET December 2026

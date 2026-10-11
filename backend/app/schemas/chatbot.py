@@ -24,3 +24,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[ChatSourceOut] = Field(default_factory=list)
     grounded: bool
+
+    # True when no AI model could be reached. The frontend shows its
+    # "service unavailable" state instead of the answer text.
+    unavailable: bool = False

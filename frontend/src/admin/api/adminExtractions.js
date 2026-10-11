@@ -147,11 +147,30 @@ export async function getExtractionById(id) {
         ? eligibilityInformation.other_requirements.join("; ")
         : eligibilityInformation.other_requirements || null,
     },
-    eligibilityRules: {
-      logicalOperator: "AND",
-      rules: [],
-      childGroups: ruleGroups.map(mapGroup),
+    // Top-level groups are all required (AND). A single group is shown as
+    // itself rather than inside an empty wrapper group.
+    eligibilityRules:
+      ruleGroups.length === 1
+        ? mapGroup(ruleGroups[0])
+        : {
+            logicalOperator: "AND",
+            rules: [],
+            childGroups: ruleGroups.map(mapGroup),
+          },
+    // Raw values for the eligibility editor.
+    eligibilityDraft: {
+      minimum_age: eligibilityInformation.minimum_age ?? null,
+      maximum_age: eligibilityInformation.maximum_age ?? null,
+      educational_qualification: eligibilityInformation.educational_qualification || "",
+      nationality: eligibilityInformation.nationality || "",
+      work_experience: eligibilityInformation.work_experience || "",
+      other_requirements: Array.isArray(eligibilityInformation.other_requirements)
+        ? eligibilityInformation.other_requirements
+        : [],
+      rule_groups: ruleGroups,
     },
+    eligibilitySource: parsed?.pipeline?.eligibility_source || "AI",
+    eligibilityNotAvailable: Boolean(parsed?.pipeline?.eligibility_not_available),
     evidence: (parsed?.evidence || []).map((item, index) => ({
       id: `${detail.extraction_id}-evidence-${index}`,
       field: item.field || "Extracted evidence",
@@ -207,6 +226,15 @@ export async function createExamExtraction(examName) {
   };
 }
 
+// Save eligibility entered or corrected by the administrator. `payload` uses
+// the backend field names (see ManualEligibility).
+export async function saveEligibility(id, payload) {
+  return adminRequest(`/admin/extractions/${encodeURIComponent(id)}/eligibility`, {
+    method: "PUT",
+    body: payload,
+  });
+}
+
 export async function approveExtraction(id) {
   return adminRequest(`/admin/extractions/${encodeURIComponent(id)}/approve`, {
     method: "POST",
@@ -248,3 +276,4 @@ export async function getDashboardStats() {
     recent: rows.slice(0, 6),
   };
 }
+

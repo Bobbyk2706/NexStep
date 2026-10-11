@@ -1,0 +1,291 @@
+
+=== FILE: backend\app\schemas\auth.py ===
+from datetime import date
+from typing import Annotated
+
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    EmailStr,
+    Field,
+)
+
+
+# ---------------------------------------------------------------- email ---
+#
+# Strict email type used for everything the client SENDS (signup/login).
+# It trims whitespace and requires a real dotted domain with a 2+ letter
+# ending, so "example@nexstep" is rejected but "name@example.com" and
+# "name@college.ac.in" pass.
+#
+# Response models below deliberately use plain `str` for email, so a
+# legacy row with a bad address can never turn a response into a 500.
+
+
+def _strip(value):
+    return value.strip() if isinstance(value, str) else value
+
+
+def _require_dotted_domain(value: str) -> str:
+    domain = value.rpartition("@")[2]
+    labels = domain.split(".")
+
+    if len(labels) < 2 or not all(labels) or len(labels[-1]) < 2:
+        raise ValueError(
+            "Enter a valid email address, for example name@example.com"
+        )
+
+    return value
+
+
+StrictEmail = Annotated[
+    EmailStr,
+    BeforeValidator(_strip),
+    AfterValidator(_require_dotted_domain),
+]
+
+
+# --------------------------------------------------------------- requests ---
+
+
+class StudentSignupRequest(BaseModel):
+    name: str
+    email: StrictEmail
+    password: str = Field(min_length=8, max_length=128)
+    date_of_birth: date
+    nationality: str
+    state: str
+    gender: str
+
+
+class LoginRequest(BaseModel):
+    email: StrictEmail
+    password: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+# Unified endpoints matching the frontend's contract (POST /auth/signup,
+# POST /auth/login): student-only, single token, no refresh flow.
+
+
+class SimpleSignupRequest(BaseModel):
+    name: str
+    email: StrictEmail
+    # The frontend requires 6+ characters, so the API matches it.
+    password: str = Field(min_length=6, max_length=128)
+
+
+# -------------------------------------------------------------- responses ---
+
+
+class UserSummary(BaseModel):
+    name: str
+    email: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserSummary
+    hasProfile: bool
+
+
+class StudentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    student_id: int
+    name: str
+    email: str
+    account_status: str | None = None
+
+
+class AdminOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    admin_id: int
+    name: str
+    email: str
+    account_status: str | None = None
+
+
+class TokenPair(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+=== FILE: backend\app\schemas\chatbot.py ===
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class ChatTurnIn(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    history: list[ChatTurnIn] = Field(default_factory=list, max_length=20)
+
+
+class ChatSourceOut(BaseModel):
+    exam_id: int
+    exam_name: str
+    notification_title: str | None = None
+    official_url: str | None = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: list[ChatSourceOut] = Field(default_factory=list)
+    grounded: bool
+
+
+=== FILE: backend\app\schemas\eligibility.py ===
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class EligibilityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    eligibility_id: int
+    student_id: int
+    exam_id: int
+    eligibility_status: str
+    reason: str | None = None
+    evaluated_at: datetime | None = None
+
+=== FILE: backend\app\schemas\exam.py ===
+from datetime import date
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ConductingBodyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    body_id: int
+    name: str
+    main_website: str
+    description: str | None = None
+    logo_url: str | None = None
+
+
+class ExamDateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    exam_date_id: int
+    start_date: date
+    end_date: date
+
+
+class OfficialNotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    notification_id: int
+    title: str
+    notification_type: str
+    release_date: date | None = None
+    application_start_date: date | None = None
+    application_end_date: date | None = None
+    official_url: str
+    document_url: str | None = None
+    ai_summary: str | None = None
+    ai_change_summary: str | None = None
+    exam_dates: list[ExamDateOut] = Field(default_factory=list)
+
+
+class ExamListOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    exam_id: int
+    name: str
+    type: str
+    description: str | None = None
+    off_exam_page: str | None = None
+    status: str | None = None
+    conducting_body: ConductingBodyOut
+
+
+class ExamDetailOut(ExamListOut):
+    latest_approved_notification: OfficialNotificationOut | None = None
+
+=== FILE: backend\app\schemas\profile.py ===
+from pydantic import BaseModel, Field
+
+
+class QualificationEntry(BaseModel):
+    """Shape used for both the repeatable `qualifications` list and the
+    single `previousQualification` entry - the frontend uses the same
+    field set for both."""
+    level: str
+    institution: str | None = None
+    field: str | None = None
+    yearCompleted: str | None = None
+    score: str | None = None
+
+
+class WorkExperienceEntry(BaseModel):
+    company: str | None = None
+    role: str | None = None
+    duration: str | None = None
+
+
+class ProfileIn(BaseModel):
+    # The name is collected at signup. It is only updated here when sent.
+    name: str | None = None
+
+    # Required personal details.
+    dob: str = Field(min_length=1)
+    nationality: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+
+    # Academic details are optional.
+    college: str | None = None
+    branch: str | None = None
+    yearOfStudy: str | None = None
+    cgpa: str | None = None
+    percentage: str | None = None
+
+    qualifications: list[QualificationEntry] = Field(default_factory=list)
+    workExperience: list[WorkExperienceEntry] = Field(default_factory=list)
+    hasHigherQualification: bool = False
+    previousQualification: QualificationEntry | None = None
+
+
+class ProfileOut(BaseModel):
+    name: str
+    dob: str | None = None
+    nationality: str | None = None
+    state: str | None = None
+    college: str | None = None
+    branch: str | None = None
+    yearOfStudy: str | None = None
+    cgpa: str | None = None
+    percentage: str | None = None
+    qualifications: list[QualificationEntry] = Field(default_factory=list)
+    workExperience: list[WorkExperienceEntry] = Field(default_factory=list)
+    hasHigherQualification: bool = False
+    previousQualification: QualificationEntry | None = None
+
+=== FILE: backend\app\schemas\tracked_exam.py ===
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class TrackedExamOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    tracking_id: int
+    student_id: int
+    exam_id: int
+    tracked_at: datetime | None = None
+    tracking_status: str

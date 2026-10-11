@@ -139,7 +139,9 @@ def get_latest_approved_notification(
                 OfficialNotification.approval_status == "APPROVED",
             )
             .order_by(
-                desc(OfficialNotification.release_date),
+                # PostgreSQL sorts NULL first in DESC order, which would
+                # make an undated notice win over every dated one.
+                desc(OfficialNotification.release_date).nulls_last(),
                 desc(OfficialNotification.notification_id),
             )
             .limit(1)

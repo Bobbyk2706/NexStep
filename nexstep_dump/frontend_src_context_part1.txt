@@ -1,0 +1,238 @@
+
+=== FILE: frontend\src\context\AuthContext.jsx ===
+import { createContext, useContext, useEffect, useState } from "react";
+import * as authApi from "../api/auth";
+import * as profileApi from "../api/profile";
+import { getToken, onSessionExpired } from "../api/client";
+
+const AuthContext = createContext(null);
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [hasProfile, setHasProfile] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function restoreSession() {
+      try {
+        if (!getToken()) return;
+
+        const [currentUser, profile] = await Promise.all([
+          authApi.getCurrentUser(),
+          profileApi.getProfile(),
+        ]);
+
+        if (!mounted) return;
+
+        setUser(currentUser);
+        setHasProfile(Boolean(profile));
+      } catch {
+        if (!mounted) return;
+        setUser(null);
+        setHasProfile(false);
+      } finally {
+        if (mounted) setChecking(false);
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    return onSessionExpired(() => {
+      setUser(null);
+      setHasProfile(false);
+    });
+  }, []);
+
+  async function login(credentials) {
+    const res = await authApi.login(credentials);
+    setUser(res.user || null);
+    setHasProfile(Boolean(res.hasProfile));
+    return res;
+  }
+
+  // Signup step 1: emails a code. No account or session exists yet.
+  async function startSignup(details) {
+    return authApi.startSignup(details);
+  }
+
+  // Signup step 2: confirms the code, creates the account, signs the person in.
+  async function verifySignup(email, code) {
+    const res = await authApi.verifySignup({ email, code });
+    setUser(res.user || null);
+    setHasProfile(Boolean(res.hasProfile));
+    return res;
+  }
+
+  async function resendSignupCode(email) {
+    return authApi.resendSignupCode(email);
+  }
+
+  async function logout() {
+    try {
+      await authApi.logout();
+    } finally {
+      setUser(null);
+      setHasProfile(false);
+    }
+  }
+
+  function markProfileComplete() {
+    setHasProfile(true);
+  }
+
+  return (
+    <AuthContext.Provider
+      value={{
+        user,
+        hasProfile,
+        checking,
+        login,
+        startSignup,
+        verifySignup,
+        resendSignupCode,
+        logout,
+        markProfileComplete,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
+  return ctx;
+}
+
+=== FILE: frontend\src\context\NotificationsContext.jsx ===
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import * as notificationsApi from "../api/notifications";
+import { useAuth } from "./AuthContext";
+
+const NotificationsContext = createContext(null);
+
+export function NotificationsProvider({ children }) {
+  const { user } = useAuth();
+  const [notifications, setNotifications] = useState([]);
+
+  const refresh = useCallback(async () => {
+    if (!user) {
+      setNotifications([]);
+      return;
+    }
+
+    const data = await notificationsApi.getNotifications();
+    setNotifications(data || []);
+  }, [user]);
+
+  useEffect(() => {
+    refresh().catch(() => setNotifications([]));
+  }, [refresh]);
+
+  async function markRead(id) {
+    const updated = await notificationsApi.markAsRead(id);
+    setNotifications(updated || []);
+  }
+
+  async function markAllRead() {
+    const updated = await notificationsApi.markAllAsRead();
+    setNotifications(updated || []);
+  }
+
+  const unreadCount = notifications.filter((n) => !n.read).length;
+
+  return (
+    <NotificationsContext.Provider
+      value={{ notifications, unreadCount, refresh, markRead, markAllRead }}
+    >
+      {children}
+    </NotificationsContext.Provider>
+  );
+}
+
+export function useNotifications() {
+  const ctx = useContext(NotificationsContext);
+  if (!ctx) throw new Error("useNotifications must be used within NotificationsProvider");
+  return ctx;
+}
+
+
+=== FILE: frontend\src\context\ProfileContext.jsx ===
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import * as profileApi from "../api/profile";
+import * as examsApi from "../api/exams";
+import { useAuth } from "./AuthContext";
+
+const ProfileContext = createContext(null);
+
+export function ProfileProvider({ children }) {
+  const { user, hasProfile } = useAuth();
+  const [profile, setProfile] = useState(null);
+  const [exams, setExams] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    if (!user || !hasProfile) {
+      setProfile(null);
+      setExams([]);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const currentProfile = await profileApi.getProfile();
+      setProfile(currentProfile);
+
+      if (currentProfile) {
+        const currentExams = await examsApi.getExamsWithEligibility();
+        setExams(currentExams || []);
+      } else {
+        setExams([]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [user, hasProfile]);
+
+  useEffect(() => {
+    refresh().catch(() => {
+      setProfile(null);
+      setExams([]);
+      setLoading(false);
+    });
+  }, [refresh]);
+
+  const eligibleExams = exams.filter((exam) => exam.eligible);
+
+  return (
+    <ProfileContext.Provider
+      value={{
+        profile,
+        exams,
+        eligibleExams,
+        loading,
+        refresh,
+      }}
+    >
+      {children}
+    </ProfileContext.Provider>
+  );
+}
+
+export function useProfile() {
+  const ctx = useContext(ProfileContext);
+  if (!ctx) throw new Error("useProfile must be used within ProfileProvider");
+  return ctx;
+}
+
