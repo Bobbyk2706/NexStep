@@ -26,5 +26,4 @@ storage/
 #test file
 
 package-lock.json
-admin_tool.Py
 test_section_detector.py
