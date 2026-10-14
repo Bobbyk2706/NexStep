@@ -42,7 +42,20 @@ from app.ai.token_budget import estimate_tokens
 PIPELINE_VERSION = "2.0"
 
 # Output tokens reserved per topic (counted against the TPM budget).
-_MAX_OUTPUT = {Facet.IDENTITY: 500, Facet.DATES: 1000, Facet.ELIGIBILITY: 1500}
+# Override in backend/.env if your selected model has different limits.
+def _output_limit(env_name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(env_name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(256, min(value, 8192))
+
+
+_MAX_OUTPUT = {
+    Facet.IDENTITY: _output_limit("NEXSTEP_OUTPUT_TOKENS_IDENTITY", 700),
+    Facet.DATES: _output_limit("NEXSTEP_OUTPUT_TOKENS_DATES", 1800),
+    Facet.ELIGIBILITY: _output_limit("NEXSTEP_OUTPUT_TOKENS_ELIGIBILITY", 2200),
+}
 
 _TASKS = {
     Facet.IDENTITY: (facts.IDENTITY_TASK, facts.IdentityDraft),
@@ -230,25 +243,6 @@ def run_extraction(
     if Facet.DATES in drafts:
         tba = "to be announced" in packs[Facet.DATES].text.lower() or " tba" in packs[Facet.DATES].text.lower()
         date_fields = compiler.compile_dates(drafts[Facet.DATES], grounder, tba)
-
-    # A revised notice carries the date of its revision ("Revised version,
-    # Date: 27th September 2026"), which is after applications opened. That is
-    # not when the notification was released, and the approval rules reject a
-    # release date after the application start, so it would block an otherwise
-    # valid extraction. Leave it empty and say why.
-    opening = date_fields.get("application_start_date")
-    if release_date and opening and release_date > opening:
-        grounder.issue(
-            "warning",
-            "release-date-after-application",
-            (
-                f"Release date {release_date} is after the application start "
-                f"date {opening}, so it looks like the date of a revised "
-                "version rather than the original release; it was left empty."
-            ),
-            "Release date",
-        )
-        release_date = None
 
     eligibility_info = EligibilityInformation()
     rules = EligibilityRulesData()

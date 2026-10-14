@@ -19,7 +19,6 @@ from sqlalchemy import select
 from app.ai.aggregated_extraction_result import (
     AggregatedExtractionResult,
 )
-from app.ai.document_gate import classify_document
 from app.ai.document_models import (
     DocumentPage,
     ParsedDocument,
@@ -606,16 +605,15 @@ def _score_pdf_link(
     exam_tokens = _extract_exam_tokens(exam_name)
 
     if exam_tokens:
-        matched = sum(
-            1
-            for token in exam_tokens
-            if token in value
-        )
+        # A year or generic exam word must never be enough to make a
+        # candidate relevant. If the URL/title/snippet contains none of
+        # the exam's identifying tokens, reject it outright.
+        matched_tokens = [token for token in exam_tokens if token in value]
+        matched = len(matched_tokens)
 
         if matched == 0:
-            score -= 6
-        else:
-            score += matched * 4
+            return -100
+        score += matched * 4
 
     # YEAR
 
@@ -901,11 +899,12 @@ def _pdf_content_looks_relevant(
         )
 
         try:
-            pages_text = [page.get_text() for page in document]
+            first_pages_text = " ".join(
+                page.get_text()
+                for page in list(document)[:2]
+            ).lower()
         finally:
             document.close()
-
-        first_pages_text = " ".join(pages_text[:2]).lower()
 
     except Exception:
         return True, ""
@@ -916,8 +915,7 @@ def _pdf_content_looks_relevant(
     heading_text = first_pages_text[:300]
 
     for keyword in _NEGATIVE_PDF_KEYWORDS:
-        # Whole words only: "rti" must not match "certificate".
-        if re.search(rf"\b{re.escape(keyword)}\b", heading_text):
+        if keyword in heading_text:
             return False, (
                 f"document heading matches non-notification "
                 f"page type ('{keyword}')"
@@ -926,24 +924,30 @@ def _pdf_content_looks_relevant(
     exam_tokens = _extract_exam_tokens(exam_name)
 
     if exam_tokens:
-        matched = any(
-            token in first_pages_text
-            for token in exam_tokens
-        )
-
-        if not matched:
-            return False, (
-                "none of the exam's identifying terms "
-                f"({', '.join(exam_tokens)}) appear anywhere in "
-                "the document text"
+        # Years are not identity evidence: unrelated documents often
+        # mention the same year. Require at least one distinctive name
+        # token in the actual PDF text.
+        identity_tokens = [
+            token for token in exam_tokens
+            if not re.fullmatch(r"20\d{2}", token)
+        ]
+        matched_tokens = [
+            token for token in identity_tokens
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])",
+                first_pages_text,
             )
+        ]
+        # For multi-word exam names, one incidental overlap (for example
+        # the authority acronym on an unrelated court order) is not enough.
+        required_matches = min(2, len(identity_tokens))
 
-    # Right exam name, wrong kind of document: a calendar, a schedule
-    # notice, an admit-card notice, or last year's notification.
-    gate = classify_document(pages_text, exam_name)
-
-    if not gate.ok:
-        return False, gate.reason
+        if len(matched_tokens) < required_matches:
+            return False, (
+                "too few distinctive exam-identifying terms appear in the "
+                f"first two pages (matched {len(matched_tokens)}, "
+                f"required {required_matches}; terms: {', '.join(identity_tokens)})"
+            )
 
     return True, ""
 

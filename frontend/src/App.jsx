@@ -19,6 +19,7 @@ import Settings from "./pages/Settings";
 import Assistant from "./pages/Assistant";
 import AppShell from "./components/layout/AppShell";
 import AdminApp from "./admin/AdminApp";
+import TrackedExams from "./pages/TrackedExams";
 
 export default function App() {
   return (
@@ -43,6 +44,7 @@ export default function App() {
                       <Route path="/eligibility" element={<Eligibility />} />
                       <Route path="/exams/:id" element={<ExamDetails />} />
                       <Route path="/upcoming" element={<UpcomingExams />} />
+                      <Route path="/tracked-exams" element={<TrackedExams />} />
                       <Route path="/notifications" element={<Notifications />} />
                       <Route path="/search" element={<SearchExams />} />
                       <Route path="/settings" element={<Settings />} />
