@@ -44,9 +44,12 @@ function firstExamDate(notification) {
 
 function mapEligibility(eligibility) {
   const eligible = eligibility?.eligibility_status === "ELIGIBLE";
+  // "UNKNOWN": the notification lists no rules to check automatically.
+  const unknown = eligibility?.eligibility_status === "UNKNOWN";
 
   return {
     eligible,
+    unknown,
     reason: eligibility?.reason || "No eligibility explanation was returned.",
     eligibility,
   };
@@ -67,6 +70,7 @@ function normalizeExam(exam, eligibility = null) {
     officialLink: exam.off_exam_page || exam.conducting_body?.main_website || null,
     eligibilityRule: eligibilityData.reason,
     eligible: eligibilityData.eligible,
+    eligibilityUnknown: eligibilityData.unknown,
     reason: eligibilityData.reason,
     eligibility: eligibilityData.eligibility,
   };
@@ -117,3 +121,4 @@ export async function getExamsWithEligibility() {
   const exams = await getExams();
   return enrichExamList(exams);
 }
+

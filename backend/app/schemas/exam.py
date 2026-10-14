@@ -49,5 +49,23 @@ class ExamListOut(BaseModel):
     conducting_body: ConductingBodyOut
 
 
+class EligibilityInfoOut(BaseModel):
+    """What the notification says about who may apply, for display."""
+
+    minimum_age: int | None = None
+    maximum_age: int | None = None
+    educational_qualification: str | None = None
+    nationality: str | None = None
+    work_experience: str | None = None
+    other_requirements: list[str] = Field(default_factory=list)
+
+    # "AI" or "ADMIN" (entered or corrected by an administrator).
+    source: str = "AI"
+
+    # True when the notification states no eligibility.
+    not_available: bool = False
+
+
 class ExamDetailOut(ExamListOut):
     latest_approved_notification: OfficialNotificationOut | None = None
+    eligibility_info: EligibilityInfoOut | None = None

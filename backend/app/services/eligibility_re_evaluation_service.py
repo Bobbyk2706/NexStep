@@ -13,6 +13,7 @@ from app.models.studentexameligibility import (
     StudentExamEligibility,
 )
 from app.services.eligibility_service import (
+    NoEligibilityRulesError,
     evaluate_eligibility,
 )
 from app.services.notification_services import queue_eligibility_change_notifications
@@ -115,7 +116,7 @@ def _create_eligibility_record(
     *,
     student_id: int,
     exam_id: int,
-    eligible: bool,
+    eligible: bool | None,
     reason: str,
     db: Session,
 ) -> StudentExamEligibility:
@@ -128,8 +129,11 @@ def _create_eligibility_record(
     record = StudentExamEligibility(
         student_id=student_id,
         exam_id=exam_id,
+        # eligible=None means the exam has no rules to check.
         eligibility_status=(
-            "ELIGIBLE"
+            "UNKNOWN"
+            if eligible is None
+            else "ELIGIBLE"
             if eligible
             else "NOT_ELIGIBLE"
         ),
@@ -166,18 +170,28 @@ def _re_evaluate_student(
             exam_id=exam_id,
             db=db,
         )
+        eligible = evaluation.eligible
+        reason = "\n".join(evaluation.reasons)
+
+    except NoEligibilityRulesError:
+        # The approved exam states no rules: unknown, not "not eligible",
+        # and not a reason to abort the batch for every other student.
+        eligible = None
+        reason = (
+            "The official notification for this exam does not list "
+            "eligibility rules that NexStep can check automatically."
+        )
+
     except Exception as error:
         raise EligibilityReEvaluationError(
             "Eligibility evaluation failed for student "
             f"{student.student_id} and exam {exam_id}."
         ) from error
 
-    reason = "\n".join(evaluation.reasons)
-
     new_record = _create_eligibility_record(
         student_id=student.student_id,
         exam_id=exam_id,
-        eligible=evaluation.eligible,
+        eligible=eligible,
         reason=reason,
         db=db,
     )

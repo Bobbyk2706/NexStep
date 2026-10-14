@@ -116,8 +116,8 @@ def test_full_workflow(app_env, monkeypatch, tmp_path):
     import json
     content = json.loads(detail["extracted_content"])
     assert content["pipeline"]["version"] == "2.0"
-    assert content["extraction"]["exam_information"]["application_end_date"] == "2026-09-27"
-    assert {i["code"] for i in content["issues"]} >= {"start-tba", "superseded-ignored"}
+    assert content["extraction"]["exam_information"]["application_end_date"] == "2026-10-05"
+    assert {i["code"] for i in content["issues"]} >= {"late-fee-deadline", "superseded-ignored"}
     assert all(e["page_numbers"] for e in content["evidence"] if e["verified"])
     assert "GATE 2027" in detail["ai_summary"]
 
@@ -167,3 +167,4 @@ def test_reject_then_retry_uses_feedback(app_env, monkeypatch):
     new_id = r.json()["extraction_id"]
     assert new_id != eid
     assert client.get(f"/admin/extractions/{new_id}", headers=admin).json()["status"] == "PENDING"
+

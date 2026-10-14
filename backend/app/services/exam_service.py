@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -42,7 +44,8 @@ def create_exam(
 
 def get_all_exams(db: Session | None = None):
     """
-    Returns all exams with their conducting body.
+    Returns all exams that have an approved notification, with their
+    conducting body.
 
     The function accepts an optional Session so callers such as
     FastAPI routes and tests can control the transaction/session.
@@ -109,7 +112,8 @@ def search_exams(
     db: Session | None = None,
 ):
     """
-    Searches exams by exam name or description.
+    Searches exams (with an approved notification) by name or
+    description.
     """
     owns_session = db is None
 
@@ -138,6 +142,120 @@ def search_exams(
         )
 
         return list(db.scalars(statement).all())
+
+    finally:
+        if owns_session:
+            db.close()
+
+
+# ============================================================
+# CATALOG: EVERY EXAM IN THE DATABASE
+# ============================================================
+
+_FILLER_WORDS = {"in", "of", "for", "and", "the", "a", "an", "to", "on"}
+
+
+def acronym_tokens(name: str | None) -> set[str]:
+    """
+    Initial-letter abbreviations of an exam name, so a student can
+    search "GATE" for "Graduate Aptitude Test in Engineering 2027".
+
+    "Graduate Aptitude Test in Engineering" -> {"gat", "gate"}
+    """
+
+    words = [
+        word
+        for word in re.findall(r"[A-Za-z]+", name or "")
+        if word.lower() not in _FILLER_WORDS
+    ]
+
+    initials = "".join(word[0].lower() for word in words)
+
+    return {
+        initials[:length]
+        for length in range(3, 7)
+        if len(initials) >= length
+    }
+
+
+def has_approved_notification(exam: Exam) -> bool:
+    return any(
+        notification.approval_status == "APPROVED"
+        for notification in exam.official_notifications
+    )
+
+
+def _matches_query(exam: Exam, query: str) -> bool:
+    query = query.casefold().strip()
+
+    if not query:
+        return True
+
+    haystack = " ".join(
+        part
+        for part in (
+            exam.name,
+            exam.description,
+            exam.type,
+            exam.body.name if exam.body else None,
+        )
+        if part
+    ).casefold()
+
+    if query in haystack:
+        return True
+
+    tokens = re.findall(r"[a-z0-9]+", query)
+
+    if not tokens:
+        return False
+
+    acronyms = acronym_tokens(exam.name)
+
+    return all(
+        token in haystack or token in acronyms
+        for token in tokens
+    )
+
+
+def get_exam_catalog(
+    query: str | None = None,
+    db: Session | None = None,
+):
+    """
+    Every exam in the database, including those whose notification is
+    still waiting for administrator approval, optionally filtered by
+    a search query (name, description, category, organization, or an
+    abbreviation such as "GATE").
+
+    Callers use has_approved_notification() to tell which exams have
+    reviewed details.
+    """
+    owns_session = db is None
+
+    if owns_session:
+        db = SessionLocal()
+
+    try:
+        statement = (
+            select(Exam)
+            .options(
+                selectinload(Exam.body),
+                selectinload(Exam.official_notifications),
+            )
+            .order_by(Exam.name.asc())
+        )
+
+        exams = list(db.scalars(statement).all())
+
+        if query and query.strip():
+            exams = [
+                exam
+                for exam in exams
+                if _matches_query(exam, query)
+            ]
+
+        return exams
 
     finally:
         if owns_session:

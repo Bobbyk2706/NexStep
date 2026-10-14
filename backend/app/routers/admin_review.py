@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -8,6 +10,10 @@ from fastapi import (
 )
 from pydantic import BaseModel
 
+from app.ai.manual_eligibility import (
+    ManualEligibility,
+    ManualEligibilityError,
+)
 from app.ai.review import (
     approve_extraction,
     reject_extraction,
@@ -19,6 +25,12 @@ from app.models.admin import Admin
 from app.models.exam import Exam
 from app.models.extraction_history import ExtractionHistory
 from app.models.official_notification import OfficialNotification
+from app.services.eligibility_edit_service import (
+    save_extraction_eligibility,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -156,6 +168,68 @@ def get_extraction_for_review(
 
 
 # ---------------------------------------------------------------------------
+# Enter / edit eligibility manually
+# ---------------------------------------------------------------------------
+
+@router.put(
+    "/{extraction_id}/eligibility",
+    status_code=status.HTTP_200_OK,
+)
+def save_eligibility(
+    extraction_id: int,
+    manual: ManualEligibility,
+    current_admin: Admin = Depends(get_current_admin),
+):
+    """
+    Store eligibility entered by the administrator on a pending extraction.
+
+    Used when the AI could not extract eligibility, or got it wrong. The
+    rules go through the same normalization and validation as extracted
+    rules; the extraction is then approved in the usual way.
+    """
+
+    try:
+        return save_extraction_eligibility(
+            extraction_id,
+            manual,
+            admin_id=current_admin.admin_id,
+        )
+
+    except ManualEligibilityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "; ".join(error.errors),
+                "errors": error.errors,
+            },
+        ) from error
+
+    except ValueError as error:
+        message = str(error)
+
+        code = (
+            status.HTTP_404_NOT_FOUND
+            if "not found" in message.lower()
+            else status.HTTP_409_CONFLICT
+            if "no longer the latest" in message.lower()
+            else status.HTTP_400_BAD_REQUEST
+        )
+
+        raise HTTPException(status_code=code, detail=message) from error
+
+    except Exception as error:
+        logger.exception(
+            "Failed to save eligibility for extraction_id=%s",
+            extraction_id,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save eligibility.",
+        ) from error
+
+
+# ---------------------------------------------------------------------------
 # Approve
 # ---------------------------------------------------------------------------
 
@@ -202,6 +276,11 @@ def approve_extraction_review(
         ) from error
 
     except Exception as error:
+        logger.exception(
+            "Failed to approve extraction_id=%s",
+            extraction_id,
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to approve extraction.",

@@ -72,7 +72,7 @@ export default function Dashboard() {
                     Applications close {formatDate(exam.applicationDeadline)} · Exam on {formatDate(exam.examDate)}
                   </p>
                 </div>
-                <EligibilityPill eligible={exam.eligible} deadline={exam.applicationDeadline} size="sm" />
+                <EligibilityPill eligible={exam.eligible} unknown={exam.eligibilityUnknown} deadline={exam.applicationDeadline} size="sm" />
               </Link>
             ))}
           </div>
@@ -141,3 +141,4 @@ export default function Dashboard() {
     </div>
   );
 }
+

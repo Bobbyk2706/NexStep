@@ -30,6 +30,15 @@ class EligibilityEvaluation:
     reasons: list[str]
 
 
+class NoEligibilityRulesError(ValueError):
+    """
+    The exam has no eligibility rules to evaluate (the notification did not
+    state any, or an administrator approved it without any).
+
+    Callers treat this as "unknown", not as "not eligible".
+    """
+
+
 class MissingStudentInfoError(ValueError):
     """
     The student's profile lacks data that a rule needs
@@ -200,21 +209,15 @@ def _get_latest_approved_notification(
             "No approved official notification found."
         )
 
-    notifications_with_dates = [
-        notification
-        for notification
-        in approved_notifications
-        if notification.release_date is not None
-    ]
-
-    if not notifications_with_dates:
-        raise ValueError(
-            "No approved official notification has a release date."
-        )
-
+    # Not every notice states a release date. Rank by release date when
+    # there is one, and use the newest record otherwise, so an approved exam
+    # can still be evaluated.
     return max(
-        notifications_with_dates,
-        key=lambda notification: notification.release_date,
+        approved_notifications,
+        key=lambda notification: (
+            notification.release_date or date.min,
+            notification.notification_id,
+        ),
     )
 
 
@@ -231,6 +234,17 @@ class _RuleGroupNode:
     logical_operator: str
     rules: list
     child_groups: list["_RuleGroupNode"]
+
+
+def _count_rules(group: "_RuleGroupNode") -> int:
+    """
+    Number of rules in a group and everything below it.
+    """
+
+    return len(group.rules) + sum(
+        _count_rules(child)
+        for child in group.child_groups
+    )
 
 
 def get_exam_rule_groups(
@@ -293,7 +307,7 @@ def get_exam_rule_groups(
         ).all()
 
         if not groups:
-            raise ValueError(
+            raise NoEligibilityRulesError(
                 "No eligibility rule groups found."
             )
 
@@ -519,6 +533,19 @@ def _rule_description(
     )
 
 
+# Educational levels in order, using the canonical names produced by
+# text_matching.canonical_text. A notice asking for a Bachelor's degree is
+# met by a Master's or a PhD as well.
+_LEVEL_RANK = {
+    "10th": 1,
+    "12th / senior secondary": 2,
+    "diploma": 3,
+    "bachelor's": 4,
+    "master's": 5,
+    "phd": 6,
+}
+
+
 def check_rule(
     student,
     rule,
@@ -603,6 +630,18 @@ def check_rule(
         student_value = canonical_text(student_value)
         rule_value = canonical_text(rule_value)
 
+        # "Qualification = Bachelor's" means "at least a Bachelor's".
+        if (
+            attribute in {"qualification", "educational qualification"}
+            and operator == "="
+            and student_value in _LEVEL_RANK
+            and rule_value in _LEVEL_RANK
+        ):
+            return (
+                _LEVEL_RANK[student_value]
+                >= _LEVEL_RANK[rule_value]
+            )
+
     try:
         return evaluate_rule(
             student_value,
@@ -659,6 +698,10 @@ def _evaluate_rule_group(
 
     for child_group in group.child_groups:
 
+        # An empty wrapper group places no condition on the student.
+        if _count_rules(child_group) == 0:
+            continue
+
         child_result = _evaluate_rule_group(
             student,
             child_group,
@@ -706,7 +749,10 @@ def _evaluate_rule_group(
     for result, detail in child_evaluations:
 
         if isinstance(detail, list):
-            reasons.extend(detail)
+            # A satisfied child group (for example the OR of accepted
+            # nationalities) must not list its unmet alternatives.
+            if not result:
+                reasons.extend(detail)
 
         elif not result:
             reasons.append(
@@ -736,10 +782,19 @@ def evaluate_eligibility(
     semantics: top-level groups are combined using AND.
     """
 
-    groups = get_exam_rule_groups(
-        exam_id,
-        db=db,
-    )
+    groups = [
+        group
+        for group in get_exam_rule_groups(
+            exam_id,
+            db=db,
+        )
+        if _count_rules(group) > 0
+    ]
+
+    if not groups:
+        raise NoEligibilityRulesError(
+            "This exam has no evaluable eligibility rules yet."
+        )
 
     evaluations = [
         _evaluate_rule_group(
@@ -757,9 +812,10 @@ def evaluate_eligibility(
     reasons: list[str] = []
 
     for evaluation in evaluations:
-        reasons.extend(
-            evaluation.reasons
-        )
+        if not evaluation.eligible:
+            reasons.extend(
+                evaluation.reasons
+            )
 
     if eligible:
         reasons = [

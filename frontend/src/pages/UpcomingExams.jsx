@@ -116,6 +116,7 @@ export default function UpcomingExams() {
 
                   <EligibilityPill
                     eligible={item.exam.eligible}
+                    unknown={item.exam.eligibilityUnknown}
                     deadline={deadline}
                     size="sm"
                   />

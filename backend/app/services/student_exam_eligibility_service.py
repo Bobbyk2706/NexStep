@@ -12,7 +12,14 @@ from app.models.studentexameligibility import (
     StudentExamEligibility,
 )
 from app.services.eligibility_service import (
+    NoEligibilityRulesError,
     evaluate_eligibility,
+)
+
+UNKNOWN_ELIGIBILITY_REASON = (
+    "The official notification for this exam does not list eligibility "
+    "rules that NexStep can check automatically. Please read the "
+    "eligibility section of the official notification."
 )
 
 
@@ -61,24 +68,32 @@ def create_eligibility(
                 "Exam not found."
             )
 
-        evaluation = evaluate_eligibility(
-            student=student,
-            exam_id=exam_id,
-            db=session,
-        )
+        try:
+            evaluation = evaluate_eligibility(
+                student=student,
+                exam_id=exam_id,
+                db=session,
+            )
 
-        reason = "\n".join(
-            evaluation.reasons
-        )
+            status = (
+                "ELIGIBLE"
+                if evaluation.eligible
+                else "NOT_ELIGIBLE"
+            )
+
+            reason = "\n".join(
+                evaluation.reasons
+            )
+
+        except NoEligibilityRulesError:
+            # No rules to check is "unknown", never "not eligible".
+            status = "UNKNOWN"
+            reason = UNKNOWN_ELIGIBILITY_REASON
 
         result = StudentExamEligibility(
             student_id=student_id,
             exam_id=exam_id,
-            eligibility_status=(
-                "ELIGIBLE"
-                if evaluation.eligible
-                else "NOT_ELIGIBLE"
-            ),
+            eligibility_status=status,
             reason=reason,
             evaluated_at=datetime.now(),
         )

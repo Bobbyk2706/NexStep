@@ -141,19 +141,33 @@ class OpenRouterProvider(AIProvider):
 
                 if not response.choices:
                     raise AIProviderResponseError(
-                        "OpenRouter returned no choices."
+                        "OpenRouter returned no choices "
+                        f"(model={selected_model!r})."
                     )
 
-                content = response.choices[0].message.content
+                choice = response.choices[0]
+                content = getattr(choice.message, "content", None)
 
-                if not content or not content.strip():
-                    raise AIProviderResponseError(
-                        "OpenRouter returned an empty response."
+                if not content or not str(content).strip():
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    message = (
+                        "OpenRouter returned empty content "
+                        f"(model={selected_model!r}, finish_reason={finish_reason!r})."
                     )
+                    # Some free/routed models intermittently return empty content.
+                    # Retry these responses just like transient transport failures.
+                    if attempt < self.max_retries:
+                        last_error = AIProviderResponseError(message)
+                        time.sleep(1 * (attempt + 1))
+                        continue
+                    raise AIProviderResponseError(message)
 
-                return content
+                return str(content)
 
-            except AIProviderResponseError:
+            except AIProviderResponseError as exc:
+                last_error = exc
+                if attempt < self.max_retries and "empty content" in str(exc):
+                    continue
                 raise
 
             except Exception as exc:

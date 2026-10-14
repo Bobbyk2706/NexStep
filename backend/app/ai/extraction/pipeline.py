@@ -9,6 +9,7 @@ Extraction pipeline v2 - the single entry point used by every workflow
 """
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,20 @@ from app.ai.token_budget import estimate_tokens
 PIPELINE_VERSION = "2.0"
 
 # Output tokens reserved per topic (counted against the TPM budget).
-_MAX_OUTPUT = {Facet.IDENTITY: 500, Facet.DATES: 1000, Facet.ELIGIBILITY: 1500}
+# Override in backend/.env if your selected model has different limits.
+def _output_limit(env_name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(env_name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(256, min(value, 8192))
+
+
+_MAX_OUTPUT = {
+    Facet.IDENTITY: _output_limit("NEXSTEP_OUTPUT_TOKENS_IDENTITY", 700),
+    Facet.DATES: _output_limit("NEXSTEP_OUTPUT_TOKENS_DATES", 1800),
+    Facet.ELIGIBILITY: _output_limit("NEXSTEP_OUTPUT_TOKENS_ELIGIBILITY", 2200),
+}
 
 _TASKS = {
     Facet.IDENTITY: (facts.IDENTITY_TASK, facts.IdentityDraft),
@@ -110,6 +124,22 @@ def run_extraction(
                 code="scanned-document",
                 message=f"{len(scanned)} of {document.page_count} pages have no text layer (scanned); "
                 "their content could not be read.",
+            )
+        )
+
+    # A calendar, result list or admit-card notice has no eligibility
+    # section. Say so plainly, because the reviewer would otherwise only see
+    # a list of dropped facts and "must contain at least one rule group".
+    if not _has_eligibility_wording(document):
+        issues.append(
+            ExtractionIssue(
+                severity="warning",
+                code="no-eligibility-section",
+                message=(
+                    "This document does not contain an eligibility section "
+                    "(age limit, qualification or nationality). It is "
+                    "probably not the main notification; check the source."
+                ),
             )
         )
 
@@ -308,6 +338,19 @@ def summarize(result: AggregatedExtractionResult) -> str:
     if result.blocking_issues:
         parts.append(f"{len(result.blocking_issues)} issue(s) need review before approval.")
     return " ".join(parts)
+
+
+_ELIGIBILITY_WORDING = re.compile(
+    r"\beligib\w*|\bage\s+limit|\beducational\s+qualification|"
+    r"\bnationality\b|\bcitizen",
+    re.IGNORECASE,
+)
+
+
+def _has_eligibility_wording(document: ParsedDocument) -> bool:
+    text = " ".join(page.text for page in document.pages)
+
+    return len(_ELIGIBILITY_WORDING.findall(text)) >= 2
 
 
 def _dedupe(issues: list[ExtractionIssue]) -> list[ExtractionIssue]:

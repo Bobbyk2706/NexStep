@@ -39,9 +39,10 @@ def _build_prompt(
 ) -> str:
     source_information = []
 
-    for source in sources:
+    for index, source in enumerate(sources, start=1):
         source_information.append(
             {
+                "source_id": f"S{index}",
                 "url": source.get("url"),
                 "text": source.get("text", "")[:1000],
             }
@@ -71,16 +72,11 @@ Rules:
 
 4. Do not invent URLs.
 
-5. selected_url MUST exactly match one of the candidate
-   source URLs.
+5. Return selected_source_id using the source_id field of one
+   candidate (for example, "S1"). Do not copy or invent a URL.
 
-6. If no relevant source exists, return:
-
-   selected_url = ""
-
-   source_type = "NONE"
-
-   relevant = false
+6. If no relevant source exists, return selected_source_id = "".
+   source_type = "NONE" and relevant = false.
 
 7. Return JSON only.
 """
@@ -127,12 +123,6 @@ def verify_exam_source(
     # CANDIDATE URL SET
     # ========================================================
 
-    candidate_urls = {
-        source.get("url")
-        for source in sources
-        if source.get("url")
-    }
-
     # ========================================================
     # PROMPT
     # ========================================================
@@ -149,7 +139,7 @@ def verify_exam_source(
     response_schema = {
         "type": "object",
         "properties": {
-            "selected_url": {
+            "selected_source_id": {
                 "type": "string",
             },
             "source_type": {
@@ -160,7 +150,7 @@ def verify_exam_source(
             },
         },
         "required": [
-            "selected_url",
+            "selected_source_id",
             "source_type",
             "relevant",
         ],
@@ -171,40 +161,43 @@ def verify_exam_source(
     # VALIDATOR
     # ========================================================
 
+    source_by_id = {
+        f"S{index}": source
+        for index, source in enumerate(sources, start=1)
+        if source.get("url")
+    }
+
     def validate_response(
         content: str,
     ) -> SourceVerificationResult:
-        """
-        Validate both the JSON structure and the critical
-        candidate-URL safety invariant.
-        """
+        """Validate the selected candidate ID and map it to its original URL."""
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Source verification did not return valid JSON.") from exc
 
-        result = SourceVerificationResult.model_validate_json(
-            content
-        )
+        if not isinstance(payload, dict):
+            raise ValueError("Source verification response must be a JSON object.")
 
-        # ----------------------------------------------------
-        # NO SOURCE SELECTED
-        # ----------------------------------------------------
-
-        if not result.selected_url:
+        source_id = str(payload.get("selected_source_id") or "").strip()
+        if not source_id:
             return SourceVerificationResult(
                 selected_url="",
                 source_type="NONE",
                 relevant=False,
             )
 
-        # ----------------------------------------------------
-        # URL MUST COME FROM CANDIDATE LIST
-        # ----------------------------------------------------
-
-        if result.selected_url not in candidate_urls:
+        source = source_by_id.get(source_id)
+        if source is None:
             raise ValueError(
-                "Source verification returned a URL that was "
-                "not present in the candidate source list."
+                "Source verification selected an ID that was not in the candidate list."
             )
 
-        return result
+        return SourceVerificationResult(
+            selected_url=source["url"],
+            source_type=str(payload.get("source_type") or "OFFICIAL"),
+            relevant=bool(payload.get("relevant", False)),
+        )
 
     # ========================================================
     # PROVIDER CHAIN
@@ -216,9 +209,9 @@ def verify_exam_source(
                 {
                     "role": "system",
                     "content": (
-                        "You are a strict source verification "
-                        "system. You may only select URLs that "
-                        "appear in the supplied candidate list."
+                        "You are a strict source verification system. "
+                        "Select only a source_id present in the supplied candidate list. "
+                        "Never invent a source ID or URL."
                     ),
                 },
                 {

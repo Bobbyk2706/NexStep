@@ -49,7 +49,7 @@ def validate_exam_information(
 
         try:
             parsed_dates[field_name] = date.fromisoformat(value)
-        except ValueError:
+        except (ValueError, TypeError):
             errors.append(
                 f"Exam information: {field_name} "
                 f"must use YYYY-MM-DD format."
@@ -77,6 +77,22 @@ def validate_exam_information(
             )
 
     # -----------------------------
+    # Release date consistency
+    # -----------------------------
+
+    release_date = parsed_dates.get(
+        "release_date"
+    )
+
+    if release_date and application_start:
+
+        if release_date > application_start:
+            errors.append(
+                "Exam information: release_date cannot be "
+                "after application_start_date."
+            )
+
+    # -----------------------------
     # Validate examination dates
     # -----------------------------
 
@@ -89,7 +105,7 @@ def validate_exam_information(
             start_date = date.fromisoformat(
                 exam_date.start_date
             )
-        except ValueError:
+        except (ValueError, TypeError):
             errors.append(
                 f"Exam information: "
                 f"exam_dates[{index}].start_date "
@@ -101,7 +117,7 @@ def validate_exam_information(
             end_date = date.fromisoformat(
                 exam_date.end_date
             )
-        except ValueError:
+        except (ValueError, TypeError):
             errors.append(
                 f"Exam information: "
                 f"exam_dates[{index}].end_date "

@@ -31,15 +31,30 @@ def test_invalid_dates_ignored():
 
 
 # ------------------------------------------------- age -> date of birth
+#
+# Every executable fact must be backed by a quote that exists in the source
+# document, so these tests give the grounder a passage and quote from it.
+
+def _text(d):
+    return f"{d.day} {d.strftime('%B')} {d.year}"
+
+
+def doc_grounder(text, dates=()):
+    passage = Passage("P1", 0, 1, 1, "Eligibility", text, tokens=10)
+    return Grounder(passages={"P1": passage}, doc_dates=set(dates))
+
+
 @pytest.mark.parametrize("kind,years,ref,op,expected", [
     ("maximum", 30, "2026-08-01", ">=", "1995-08-02"),   # aged <=30 on 1 Aug 2026 => born after 1 Aug 1995
     ("minimum", 18, "2026-08-01", "<=", "2008-08-01"),
     ("maximum", 25, "2028-02-29", ">=", "2002-03-01"),   # leap-day reference
 ])
 def test_age_becomes_dob_rule(kind, years, ref, op, expected):
-    g = grounder([date.fromisoformat(ref)])
+    d = date.fromisoformat(ref)
+    quote = f"age {years} years as on {_text(d)}"
+    g = doc_grounder(quote, [d])
     draft = EligibilityDraft(
-        age_limits=[AgeLimit(kind=kind, years=years, as_on_date=ref, quote=None, passage=None)],
+        age_limits=[AgeLimit(kind=kind, years=years, as_on_date=ref, quote=quote, passage="P1")],
         work_experience=Fact(),
     )
     _, rules = compiler.compile_eligibility(draft, g, "")
@@ -48,18 +63,39 @@ def test_age_becomes_dob_rule(kind, years, ref, op, expected):
 
 
 def test_age_without_reference_date_creates_no_rule_but_warns():
-    g = grounder()
-    draft = EligibilityDraft(age_limits=[AgeLimit(kind="maximum", years=30)], work_experience=Fact())
+    quote = "up to 30 years of age"
+    g = doc_grounder(quote)
+    draft = EligibilityDraft(
+        age_limits=[AgeLimit(kind="maximum", years=30, quote=quote, passage="P1")],
+        work_experience=Fact(),
+    )
     info, rules = compiler.compile_eligibility(draft, g, "")
     assert info.maximum_age == 30 and rules.rule_groups == []
     assert any(i.code == "age-no-reference-date" for i in g.issues)
 
 
+def test_must_not_have_attained_excludes_the_limit_itself():
+    ref = date(2025, 8, 1)
+    quote = "must not have attained the age of 32 years on the 1st of August, 2025"
+    g = doc_grounder(quote, [ref])
+    draft = EligibilityDraft(
+        age_limits=[AgeLimit(kind="maximum", years=32, as_on_date="2025-08-01", quote=quote, passage="P1")],
+        work_experience=Fact(),
+    )
+    info, rules = compiler.compile_eligibility(draft, g, "")
+    rule = rules.rule_groups[0].rules[0]
+    assert (rule.operator, rule.value) == (">=", "1993-08-02")
+    assert info.maximum_age == 31
+
+
 def test_category_age_relaxation_is_not_a_general_rule():
-    g = grounder([date(2026, 8, 1)])
+    ref = date(2026, 8, 1)
+    general = "up to 30 years as on 1 August 2026"
+    relaxed = "33 years in the case of OBC candidates as on 1 August 2026"
+    g = doc_grounder(f"{general}. Relaxed to {relaxed}.", [ref])
     draft = EligibilityDraft(age_limits=[
-        AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01"),
-        AgeLimit(kind="maximum", years=33, applies_to="OBC", as_on_date="2026-08-01"),
+        AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01", quote=general, passage="P1"),
+        AgeLimit(kind="maximum", years=33, applies_to="OBC", as_on_date="2026-08-01", quote=relaxed, passage="P1"),
     ], work_experience=Fact())
     info, rules = compiler.compile_eligibility(draft, g, "")
     assert info.maximum_age == 30
@@ -68,21 +104,35 @@ def test_category_age_relaxation_is_not_a_general_rule():
 
 
 def test_conflicting_general_limits_are_reported_not_fatal():
-    g = grounder([date(2026, 8, 1)])
+    ref = date(2026, 8, 1)
+    first = "Group A: up to 30 years as on 1 August 2026"
+    second = "Group B: up to 32 years as on 1 August 2026"
+    g = doc_grounder(f"{first}. {second}.", [ref])
     draft = EligibilityDraft(age_limits=[
-        AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01"),
-        AgeLimit(kind="maximum", years=32, as_on_date="2026-08-01"),
+        AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01", quote=first, passage="P1"),
+        AgeLimit(kind="maximum", years=32, as_on_date="2026-08-01", quote=second, passage="P1"),
     ], work_experience=Fact())
     compiler.compile_eligibility(draft, g, "")
     assert len(g.conflicts) == 1 and len(g.conflicts[0].options) == 2
 
 
 def test_alternatives_become_or_group_and_nationality_is_canonical():
-    g = grounder()
+    text = (
+        "A Bachelor's degree or a Master's degree is required. "
+        "Minimum 55% marks. Citizens of India or Nepal may apply."
+    )
+    g = doc_grounder(text)
     draft = EligibilityDraft(
-        qualifications=[QualificationFact(level="Bachelor's"), QualificationFact(level="Master's")],
+        qualifications=[
+            QualificationFact(level="Bachelor's", quote="A Bachelor's degree", passage="P1"),
+            QualificationFact(level="Master's", quote="a Master's degree", passage="P1"),
+        ],
         nationalities=["Indian", "Nepali", "India"],
+        nationality_quote="Citizens of India or Nepal may apply",
+        nationality_passage="P1",
         minimum_percentage=55.0,
+        score_quote="Minimum 55% marks",
+        score_passage="P1",
         work_experience=Fact(),
     )
     info, rules = compiler.compile_eligibility(draft, g, "")
@@ -98,10 +148,18 @@ def test_output_passes_the_existing_approval_gate():
     from app.ai.complete_extraction_validation import validate_complete_extraction
     from app.ai.exam_schemas import ExamInformation
     from app.ai.extraction_schemas import CompleteExtractionData
-    g = grounder([date(2026, 8, 1)])
+    ref = date(2026, 8, 1)
+    text = (
+        "Age up to 30 years as on 1 August 2026. A Bachelor's degree. "
+        "Citizens of India only."
+    )
+    g = doc_grounder(text, [ref])
     draft = EligibilityDraft(
-        age_limits=[AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01")],
-        qualifications=[QualificationFact(level="Bachelor's")], nationalities=["India"], work_experience=Fact())
+        age_limits=[AgeLimit(kind="maximum", years=30, as_on_date="2026-08-01",
+                             quote="Age up to 30 years as on 1 August 2026", passage="P1")],
+        qualifications=[QualificationFact(level="Bachelor's", quote="A Bachelor's degree", passage="P1")],
+        nationalities=["India"], nationality_quote="Citizens of India only", nationality_passage="P1",
+        work_experience=Fact())
     info, rules = compiler.compile_eligibility(draft, g, "")
     data = CompleteExtractionData(
         exam_information=ExamInformation(exam_name="X", conducting_body="Y", eligibility=info),
@@ -188,3 +246,4 @@ def test_validation_failure_is_flagged_for_corrective_retry(monkeypatch):
     with pytest.raises(AllAIProvidersFailedError) as e:
         m.generate(messages=[{"role": "user", "content": "hi"}], validator=lambda s: 1 / 0)
     assert e.value.validation_failed
+
