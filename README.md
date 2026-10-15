@@ -67,9 +67,6 @@ It combines **AI, automation, and rule-based eligibility evaluation** to provide
 - Database Design
 - Initial PostgreSQL Tables & Relationships
 - Authentication
-
-### Next
-
 - Backend Development
 - Eligibility Engine
 - Frontend Development
