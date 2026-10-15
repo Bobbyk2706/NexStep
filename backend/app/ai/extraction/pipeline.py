@@ -242,7 +242,12 @@ def run_extraction(
     date_fields = {"application_start_date": None, "application_end_date": None, "exam_dates": []}
     if Facet.DATES in drafts:
         tba = "to be announced" in packs[Facet.DATES].text.lower() or " tba" in packs[Facet.DATES].text.lower()
-        date_fields = compiler.compile_dates(drafts[Facet.DATES], grounder, tba)
+        date_fields = compiler.compile_dates(
+            drafts[Facet.DATES],
+            grounder,
+            tba,
+            packs[Facet.DATES].text,
+        )
 
     eligibility_info = EligibilityInformation()
     rules = EligibilityRulesData()
