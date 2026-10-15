@@ -224,6 +224,13 @@ Task: extract the schedule.
 - late_fee_end_date: last date to apply in the extended / late-fee period,
   if any.
 
+Read schedule tables and labelled lines together: a date may appear on a
+separate line from "opening", "closing", "regular period", or "late fee".
+Copy the date and quote the shortest supplied text that connects it to the
+correct application event. If the notice explicitly says the start date is
+"to be announced", leave application_start_date null; do not substitute a
+superseded date.
+
 - exam_dates: every actual examination date stated in the supplied passages.
 
 For exam_dates:
@@ -290,6 +297,11 @@ without a quote cannot be used, so leave it out instead of guessing.
   level must be one of the allowed values.
   Put the subject area in field.
   quote: the sentence that names the qualification.
+  Inspect eligibility prose, tables, and continuation passages. If the
+  notice states who is eligible by education or current year of study,
+  include that qualification even when it appears in a table or is phrased
+  as a degree-equivalence rule. Do not leave qualifications empty when an
+  explicit educational requirement is present in the supplied passages.
 
 - minimum_percentage / minimum_cgpa:
   only if a minimum score is required.

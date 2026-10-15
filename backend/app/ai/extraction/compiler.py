@@ -31,6 +31,7 @@ from app.ai.extraction.facts import (
     EligibilityDraft,
     Fact,
 )
+from app.ai.extraction.dates import find_dates
 from app.ai.extraction.age_rules import (
     dob_boundary,
     find_age_reference_date,
@@ -198,6 +199,7 @@ def compile_dates(
     draft: DatesDraft,
     g: Grounder,
     tba_hint: bool,
+    context_text: str = "",
 ) -> dict:
     """
     Validate and ground every date.
@@ -216,16 +218,20 @@ def compile_dates(
         fact: Fact,
         label: str,
     ) -> str | None:
-        if not fact.value:
-            return None
+        quote, passage, value = fact.quote, fact.passage, fact.value
+        if not value:
+            recovered_fact = _recover_application_date(context_text, label)
+            if recovered_fact is None:
+                return None
+            value, quote, passage = recovered_fact
 
-        parsed = iso(fact.value)
+        parsed = iso(value)
 
         if parsed is None:
             g.issue(
                 "warning",
                 "date-unparsed",
-                f"{label}: '{fact.value}' is not a valid date.",
+                f"{label}: '{value}' is not a valid date.",
                 label,
             )
             return None
@@ -243,11 +249,13 @@ def compile_dates(
             )
             return None
 
+        if not _date_quote_located(g, quote, passage, parsed):
+            recovered = _recover_date_quote(context_text, parsed, label)
+            if recovered is not None:
+                quote, passage = recovered
+
         # The supporting quote must specifically support the date.
-        if not g.quote_backs_date(
-            parsed,
-            fact.quote,
-        ):
+        if not g.quote_backs_date(parsed, quote):
             g.issue(
                 "warning",
                 "date-quote-mismatch",
@@ -262,8 +270,9 @@ def compile_dates(
         # The quote must actually be found in the source document.
         supported = g.support(
             label,
-            fact.quote,
-            fact.passage,
+            quote,
+            passage,
+            required=False,
         )
 
         if not supported:
@@ -279,6 +288,17 @@ def compile_dates(
             return None
 
         return parsed.isoformat()
+
+    def _date_quote_located(
+        grounder: Grounder,
+        quote: str | None,
+        passage: str | None,
+        value: date,
+    ) -> bool:
+        return (
+            grounder.quote_backs_date(value, quote)
+            and locate_quote(quote, passage, grounder.passages) is not None
+        )
 
     start = scalar(
         draft.application_start_date,
@@ -716,6 +736,128 @@ def _recover_sentence(
                 return sentence[:400], passage_id
 
     return None
+
+
+def _recover_date_quote(
+    context_text: str,
+    value: date,
+    label: str,
+) -> tuple[str, str] | None:
+    """Recover literal date evidence from the relevant schedule row."""
+    field = label.lower()
+    if "late-fee" in field:
+        required = re.compile(r"\b(?:late|extended|extension)\b", re.I)
+        excluded = None
+    elif "start" in field:
+        required = re.compile(
+            r"\b(?:open(?:ing)?|start(?:ing)?|commenc\w*|begin\w*|registration)\b",
+            re.I,
+        )
+        excluded = re.compile(r"\b(?:late|extended|closing|last date)\b", re.I)
+    else:
+        required = re.compile(
+            r"\b(?:clos(?:e|es|ed|ing)|last date|deadline|end date|registration)\b",
+            re.I,
+        )
+        excluded = re.compile(r"\b(?:late|extended|with late fee)\b", re.I)
+
+    candidates: list[tuple[int, str, str]] = []
+    for passage_id, text in _passage_blocks(context_text):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if value not in {mention.value for mention in find_dates(line)}:
+                continue
+
+            for start in range(max(0, index - 2), index + 1):
+                for end in range(index + 1, min(len(lines), start + 4) + 1):
+                    snippet = " ".join(lines[start:end])
+                    if value not in {mention.value for mention in find_dates(snippet)}:
+                        continue
+                    if not required.search(snippet):
+                        continue
+                    if excluded and excluded.search(snippet):
+                        continue
+                    candidates.append((len(snippet), snippet[:400], passage_id))
+
+    if not candidates:
+        return None
+    _, quote, passage_id = min(candidates, key=lambda candidate: candidate[0])
+    return quote, passage_id
+
+
+def _recover_application_date(
+    context_text: str,
+    label: str,
+) -> tuple[str, str, str] | None:
+    """Find an application schedule date when the model omitted the field."""
+    field = label.lower()
+    if "late-fee" in field:
+        required = re.compile(r"\b(?:late|extended|extension)\b", re.I)
+        excluded = None
+    elif "start" in field:
+        required = re.compile(
+            r"\b(?:open(?:ing)?|start(?:ing)?|commenc\w*|begin\w*|registration)\b",
+            re.I,
+        )
+        excluded = re.compile(r"\b(?:late|extended|closing|last date)\b", re.I)
+    else:
+        required = re.compile(
+            r"\b(?:clos(?:e|es|ed|ing)|last date|deadline|end date|registration)\b",
+            re.I,
+        )
+        excluded = re.compile(r"\b(?:late|extended|with late fee)\b", re.I)
+
+    candidates: list[tuple[int, date, str, str]] = []
+    for passage_id, text in _passage_blocks(context_text):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for index in range(len(lines)):
+            for start in range(max(0, index - 2), index + 1):
+                for end in range(index + 1, min(len(lines), start + 4) + 1):
+                    snippet = " ".join(lines[start:end])
+                    if not required.search(snippet) or (excluded and excluded.search(snippet)):
+                        continue
+                    for mention in find_dates(snippet):
+                        candidates.append((len(snippet), mention.value, snippet[:400], passage_id))
+
+    if not candidates:
+        return None
+    _, value, quote, passage_id = min(candidates, key=lambda item: item[0])
+    return value.isoformat(), quote, passage_id
+
+
+def _recover_qualification_candidates(
+    context_text: str,
+) -> list[tuple[str, str, str]]:
+    """Find explicit education requirements when the model omitted them.
+
+    Each returned qualification is tied to a literal sentence in the
+    retrieved eligibility passages, so the compiler can ground it normally.
+    """
+    candidates: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    eligibility_cue = re.compile(
+        r"\b(?:eligib\w*|qualif\w*|must\s+(?:have|possess|hold)|"
+        r"shall\s+(?:have|possess|hold)|should\s+(?:have|possess|hold)|"
+        r"required\s+to|currently\s+(?:studying|pursuing)|"
+        r"completed|degree\s+of)\b",
+        re.I,
+    )
+
+    for passage_id, text in _passage_blocks(context_text):
+        for part in re.split(r"(?<=[.;:])\s+|\n+", text):
+            sentence = part.strip()
+            if len(sentence) < 18 or not eligibility_cue.search(sentence):
+                continue
+            levels = [
+                level for level in _LEVEL_ORDER
+                if _level_backs_quote(level, sentence)
+            ]
+            for level in levels:
+                key = (level, sentence)
+                if key not in seen:
+                    candidates.append((level, sentence[:400], passage_id))
+                    seen.add(key)
+    return candidates
 
 
 def _resolve_quote(
@@ -1276,6 +1418,37 @@ def compile_eligibility(
 
         quals_text += " " + (
             quote or ""
+        )
+
+    # A model may omit all qualifications even though the retrieved
+    # eligibility text states them explicitly. Recover only a literal
+    # qualification sentence from those passages and still ground it.
+    recovered_qualification = False
+    if not levels:
+        for level, quote, passage in _recover_qualification_candidates(context_text):
+            if level in levels or not _level_backs_quote(level, quote):
+                continue
+            if not g.support(
+                f"Qualification: {level}",
+                quote,
+                passage,
+                required=False,
+            ):
+                continue
+            levels.append(level)
+            quals_text += " " + quote
+            recovered_qualification = True
+
+    if recovered_qualification:
+        g.issue(
+            "info",
+            "qualification-recovered",
+            (
+                "No usable qualification was returned by the model, so "
+                "an explicit education requirement from the notification "
+                "was used."
+            ),
+            "Educational Qualification",
         )
 
     levels = _expand_higher(
